@@ -55,8 +55,33 @@ public struct PhaseTwo: @unchecked Sendable {
             redeemers = []
         }
 
+        // Check upfront if any spending inputs are missing (e.g., already spent on-chain).
+        let sortedInputs = transaction.transactionBody.inputs.asArray.sorted {
+            if $0.transactionId.payload != $1.transactionId.payload {
+                return $0.transactionId.payload.lexicographicallyPrecedes($1.transactionId.payload)
+            }
+            return $0.index < $1.index
+        }
+
+        var unresolvableIndices = Set<Int>()
+        for (arrayIndex, redeemer) in redeemers.enumerated() where redeemer.tag == .spend {
+            guard redeemer.index < sortedInputs.count else { continue }
+            let spentInput = sortedInputs[redeemer.index]
+            let isResolved = resolvedInputs.contains {
+                $0.input.transactionId.payload == spentInput.transactionId.payload
+                && $0.input.index == spentInput.index
+            }
+            if !isResolved {
+                unresolvableIndices.insert(arrayIndex)
+            }
+        }
+
         let results: [RedeemerResult] = try await withThrowingTaskGroup(of: RedeemerResult.self) { group in
             for (index, redeemer) in redeemers.enumerated() {
+                if unresolvableIndices.contains(index) {
+                    // Skip evaluation; will add error result below
+                    continue
+                }
                 group.addTask {
                     await evaluateSingleScript(
                         redeemer: redeemer,
@@ -71,6 +96,23 @@ public struct PhaseTwo: @unchecked Sendable {
             for try await result in group {
                 collected.append(result)
             }
+
+            // Add error results for unresolvable spending redeemers
+            for (arrayIndex, redeemer) in redeemers.enumerated() where unresolvableIndices.contains(arrayIndex) {
+                var inputRef = "?"
+                if redeemer.index < sortedInputs.count {
+                    inputRef = sortedInputs[redeemer.index].description
+                }
+                let err = MachineError.typeError("Unresolved spent input for spend redeemer[\(arrayIndex)]: could not find UTxO for input \(inputRef)")
+                collected.append(RedeemerResult(
+                    index: arrayIndex,
+                    passed: false,
+                    remainingBudget: .restricted,
+                    logs: [],
+                    error: err
+                ))
+            }
+
             return collected.sorted { $0.index < $1.index }
         }
 
