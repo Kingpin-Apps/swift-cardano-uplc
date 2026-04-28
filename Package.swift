@@ -12,7 +12,6 @@ let package = Package(
     ],
     dependencies: [
         .package(url: "https://github.com/Kingpin-Apps/swift-cardano-core.git", from: "0.2.26"),
-        .package(url: "https://github.com/Kingpin-Apps/swift-cardano-chain.git", from: "0.1.0"),
         .package(url: "https://github.com/Kingpin-Apps/swift-blst.git", from: "0.1.2"),
         .package(url: "https://github.com/Kingpin-Apps/swift-ncal.git", from: "0.2.2"),
         .package(url: "https://github.com/krzyzanowskim/CryptoSwift.git", from: "1.9.0"),
@@ -25,8 +24,7 @@ let package = Package(
             name: "SwiftCardanoUPLC",
             dependencies: [
                 .product(name: "SwiftCardanoCore", package: "swift-cardano-core"),
-                .product(name: "SwiftCardanoChain", package: "swift-cardano-chain"),
-                .product(name: "SwiftBLST", package: "swift-blst"),
+.product(name: "SwiftBLST", package: "swift-blst"),
                 .product(name: "SwiftNcal", package: "swift-ncal"),
                 .product(name: "CryptoSwift", package: "CryptoSwift"),
                 .product(name: "P256K", package: "swift-secp256k1"),

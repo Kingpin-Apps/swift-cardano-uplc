@@ -18,9 +18,9 @@ The evaluation pipeline for each redeemer is:
 
 ```swift
 import SwiftCardanoUPLC
-import SwiftCardanoChain
 
-let phaseTwo = PhaseTwo(chainContext: context)
+let pp       = try await chainContext.protocolParameters()
+let phaseTwo = try PhaseTwo(protocolParameters: pp)
 let result   = try await phaseTwo.evaluate(
     transaction: tx,
     resolvedInputs: resolvedUTxOs   // all inputs + reference inputs

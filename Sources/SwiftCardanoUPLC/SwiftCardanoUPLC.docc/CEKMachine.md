@@ -23,7 +23,7 @@ Every step deducts from an ``ExBudget``. Use `.unlimited` for tests and offline 
 var machine = CEKMachine(budget: .unlimited, costModel: .defaultV2())
 
 // On-chain simulation
-let costModel = try await CostModel.fromChainContext(context)
+let costModel = try CostModel.fromProtocolParams(try await context.protocolParameters())
 var machine   = CEKMachine(budget: .restricted, costModel: costModel)
 ```
 

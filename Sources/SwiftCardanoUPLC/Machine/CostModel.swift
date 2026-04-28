@@ -1,6 +1,5 @@
 import Foundation
 import SwiftCardanoCore
-import SwiftCardanoChain
 
 // MARK: — ExBudget
 
@@ -136,11 +135,6 @@ public struct CostModel: Sendable {
         return .defaultV2()
     }
 
-    /// Load cost model from a live chain context.
-    public static func fromChainContext(_ context: any ChainContext) async throws -> CostModel {
-        let params = try await context.protocolParameters()
-        return try fromProtocolParams(params)
-    }
 }
 
 /// Plutus script language version.

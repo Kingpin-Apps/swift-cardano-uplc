@@ -1,6 +1,5 @@
 import Foundation
 import SwiftCardanoCore
-import SwiftCardanoChain
 
 /// Result of evaluating all scripts in a transaction.
 public struct PhaseTwoResult: Sendable {
@@ -24,10 +23,16 @@ public struct RedeemerResult: Sendable {
 /// Scripts run in parallel via Swift structured concurrency.
 /// Each redeemer gets its own independent `CEKMachine` instance.
 public struct PhaseTwo: @unchecked Sendable {
-    private let chainContext: any ChainContext
+    private let costModel: CostModel
 
-    public init(chainContext: any ChainContext) {
-        self.chainContext = chainContext
+    /// Primary initializer — caller supplies a fully built cost model.
+    public init(costModel: CostModel) {
+        self.costModel = costModel
+    }
+
+    /// Convenience — derive the cost model from protocol parameters.
+    public init(protocolParameters: ProtocolParameters, version: PlutusVersion = .v2) throws {
+        self.costModel = try CostModel.fromProtocolParams(protocolParameters, version: version)
     }
 
     /// Evaluate all Plutus scripts in a transaction.
@@ -40,7 +45,7 @@ public struct PhaseTwo: @unchecked Sendable {
         transaction: Transaction,
         resolvedInputs: [UTxO]
     ) async throws -> PhaseTwoResult {
-        let costModel = try await CostModel.fromChainContext(chainContext)
+        let costModel = self.costModel
         let redeemers: [Redeemer]
         if let rs = transaction.transactionWitnessSet.redeemers {
             switch rs {
