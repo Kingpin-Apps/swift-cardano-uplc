@@ -1,3 +1,9 @@
+## 0.1.3 (2026-04-28)
+
+### Fix
+
+- pass protocol params/costmodels to PhaseTwoResult to remove dependency on swift-cardano-chain
+
 ## 0.1.2 (2026-04-07)
 
 ### Fix
