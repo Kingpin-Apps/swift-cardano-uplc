@@ -1,5 +1,5 @@
 {
-  "originHash" : "52e36783854faf39ada46ce5a79457b11236c500731adac975c88beba3d3d499",
+  "originHash" : "8de3d52bbe15ed44ed7339eb7f3c85406806ead7f1e3dbd679871291584a0680",
   "pins" : [
     {
       "identity" : "base32",
@@ -87,8 +87,8 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/Kingpin-Apps/swift-cardano-core.git",
       "state" : {
-        "revision" : "6a1d38ad54595a8f506dcd195fb036f1fd71f751",
-        "version" : "0.2.31"
+        "revision" : "95aa7b5363014ec99e482982fdad601b6b7d3dc8",
+        "version" : "0.3.16"
       }
     },
     {
@@ -132,8 +132,8 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/apple/swift-log.git",
       "state" : {
-        "revision" : "8c0f217f01000dd30f60d6e536569ad4e74291f9",
-        "version" : "1.11.0"
+        "revision" : "5073617dac96330a486245e4c0179cb0a6fd2256",
+        "version" : "1.12.0"
       }
     },
     {
@@ -141,8 +141,8 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/Kingpin-Apps/swift-mnemonic.git",
       "state" : {
-        "revision" : "b05972fe91e2fd63a507b73862842724007a35bc",
-        "version" : "0.2.1"
+        "revision" : "af037bfb8964c380e387cac5c413074e6929123c",
+        "version" : "0.2.2"
       }
     },
     {
