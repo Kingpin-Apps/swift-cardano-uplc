@@ -2,8 +2,11 @@
 import Foundation
 import SwiftCardanoCore
 import OrderedCollections
+#if canImport(CryptoKit)
 import CryptoKit
-import CommonCrypto
+#else
+import Crypto
+#endif
 @preconcurrency import SwiftNcal
 @preconcurrency import CryptoSwift
 import SwiftBLST
