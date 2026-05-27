@@ -11,7 +11,7 @@ let package = Package(
         .library(name: "SwiftCardanoUPLC", targets: ["SwiftCardanoUPLC"]),
     ],
     dependencies: [
-        .package(url: "https://github.com/Kingpin-Apps/swift-cardano-core.git", from: "0.3.21"),
+        .package(url: "https://github.com/Kingpin-Apps/swift-cardano-core.git", from: "0.4.0"),
         .package(url: "https://github.com/Kingpin-Apps/swift-blst.git", from: "0.1.4"),
         .package(url: "https://github.com/Kingpin-Apps/swift-ncal.git", from: "0.2.3"),
         .package(url: "https://github.com/krzyzanowskim/CryptoSwift.git", from: "1.9.0"),
