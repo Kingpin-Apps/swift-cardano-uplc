@@ -7,7 +7,7 @@ import CryptoKit
 #else
 import Crypto
 #endif
-@preconcurrency import SwiftNcal
+@preconcurrency import SwiftNaCl
 @preconcurrency import CryptoSwift
 import SwiftBLST
 import P256K
@@ -626,7 +626,7 @@ private func euclideanMod(_ a: BigInt, _ b: BigInt) -> BigInt {
 
 private func blake2b(_ data: Data, digestSize: Int) throws -> Data {
     // Use the one-shot API which correctly sizes the output buffer,
-    // avoiding a bug in SwiftNcal's streaming blake2bFinal that
+    // avoiding a bug in SwiftNaCl's streaming blake2bFinal that
     // allocates a bytesMax-sized buffer and returns it un-truncated.
     let sodium = Sodium()
     return try sodium.cryptoGenericHash.blake2bSaltPersonal(

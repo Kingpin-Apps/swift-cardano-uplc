@@ -1,7 +1,7 @@
 import Foundation
 import OrderedCollections
 import SwiftCardanoCore
-import SwiftNcal
+import SwiftNaCl
 
 /// Builds the `ScriptContext` PlutusData argument passed to each validator script.
 /// Version-sensitive: V1 (Alonzo), V2 (Babbage/Vasil), V3 (Conway).
