@@ -2,7 +2,7 @@
 import PackageDescription
 
 let package = Package(
-    name: "swift-cardano-uplc",
+    name: "SwiftCardanoUPLC",
     platforms: [
         .macOS(.v15),
         .iOS(.v17),
