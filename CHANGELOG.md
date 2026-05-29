@@ -1,3 +1,9 @@
+## 0.3.0 (2026-05-28)
+
+### Feat
+
+- rename SwiftNcal import to SwiftNaCl
+
 ## 0.2.0 (2026-05-26)
 
 ## 0.1.7 (2026-05-15)
