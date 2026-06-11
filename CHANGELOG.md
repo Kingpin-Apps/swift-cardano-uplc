@@ -1,3 +1,9 @@
+## 0.3.1 (2026-06-10)
+
+### Fix
+
+- update dependencies and add tests
+
 ## 0.3.0 (2026-05-28)
 
 ### Feat
