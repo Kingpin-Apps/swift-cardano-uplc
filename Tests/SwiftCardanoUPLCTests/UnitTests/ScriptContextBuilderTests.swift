@@ -1,0 +1,497 @@
+import Testing
+import Foundation
+import OrderedCollections
+import SwiftCardanoCore
+@testable import SwiftCardanoUPLC
+
+// MARK: — PlutusData navigation helpers
+
+private extension PlutusData {
+    /// Constructor tag, or nil if this is not a constructor.
+    var constrTag: UInt64? {
+        if case .constructor(let c) = self { return c.tag }
+        return nil
+    }
+    /// Constructor fields, or nil if this is not a constructor.
+    var constrFields: [PlutusData]? {
+        if case .constructor(let c) = self { return c.fields }
+        return nil
+    }
+    var arrayItems: [PlutusData]? {
+        if case .array(let a) = self { return a }
+        return nil
+    }
+    var mapEntries: OrderedDictionary<PlutusData, PlutusData>? {
+        if case .map(let m) = self { return m }
+        return nil
+    }
+    var bytesData: Data? {
+        if case .bytes(let b) = self { return b.data }
+        return nil
+    }
+    var intValue: Int64? {
+        if case .bigInt(let n) = self { return n.intValue }
+        return nil
+    }
+}
+
+// MARK: — Fixtures
+
+private let emptyBytes = PlutusData.bytes(.byteString(ByteString(bytes: Data())))
+
+private func scriptAddress(_ byte: UInt8 = 0xAB) throws -> Address {
+    try Address(
+        paymentPart: .scriptHash(ScriptHash(payload: Data(repeating: byte, count: SCRIPT_HASH_SIZE))),
+        stakingPart: nil,
+        network: .testnet
+    )
+}
+
+private func vkeyAddress(_ byte: UInt8 = 0x11) throws -> Address {
+    try Address(
+        paymentPart: .verificationKeyHash(VerificationKeyHash(payload: Data(repeating: byte, count: VERIFICATION_KEY_HASH_SIZE))),
+        stakingPart: nil,
+        network: .testnet
+    )
+}
+
+private func txInput(_ idByte: UInt8 = 0x01, index: UInt16 = 0) -> TransactionInput {
+    TransactionInput(
+        transactionId: TransactionId(payload: Data(repeating: idByte, count: TRANSACTION_HASH_SIZE)),
+        index: index
+    )
+}
+
+/// A spendable UTxO at a script address holding `coin` lovelace.
+private func scriptUTxO(
+    _ idByte: UInt8 = 0x01,
+    coin: Int64 = 2_000_000,
+    datumOption: DatumOption? = nil,
+    addrByte: UInt8 = 0xAB
+) throws -> UTxO {
+    let output = TransactionOutput(
+        address: try scriptAddress(addrByte),
+        amount: Value(coin: coin),
+        datumOption: datumOption
+    )
+    return UTxO(input: txInput(idByte), output: output)
+}
+
+@Suite("ScriptContextBuilder — spending & minting contexts")
+struct ScriptContextBuilderTests {
+
+    // MARK: — Top-level ScriptContext shape
+
+    @Test("spending context is Constr(0, [txInfo, purpose])")
+    func spendingContext_topLevelShape() throws {
+        let input = txInput()
+        let utxo = try scriptUTxO()
+        let body = TransactionBody(inputs: .list([input]), outputs: [], fee: 0)
+        let tx = Transaction(transactionBody: body, transactionWitnessSet: TransactionWitnessSet())
+
+        let ctx = try ScriptContextBuilder().spendingContext(
+            transaction: tx, spentInput: input, resolvedInputs: [utxo], version: .v2
+        )
+
+        #expect(ctx.constrTag == 0)
+        #expect(ctx.constrFields?.count == 2)
+    }
+
+    @Test("spending purpose is Spending(Constr 1) wrapping the spent outRef")
+    func spendingContext_purposeIsSpending() throws {
+        let input = txInput(0x07, index: 3)
+        let utxo = try scriptUTxO(0x07)
+        // Output's input must match the spent input for it to resolve.
+        let resolvedUTxO = UTxO(input: input, output: utxo.output)
+        let body = TransactionBody(inputs: .list([input]), outputs: [], fee: 0)
+        let tx = Transaction(transactionBody: body, transactionWitnessSet: TransactionWitnessSet())
+
+        let ctx = try ScriptContextBuilder().spendingContext(
+            transaction: tx, spentInput: input, resolvedInputs: [resolvedUTxO], version: .v2
+        )
+
+        let purpose = try #require(ctx.constrFields?[1])
+        #expect(purpose.constrTag == 1)  // Spending
+        let txInInfo = try #require(purpose.constrFields?.first)
+        #expect(txInInfo.constrTag == 0)
+        // [ txId-constr, index ]
+        let txIdConstr = try #require(txInInfo.constrFields?[0])
+        #expect(txIdConstr.constrTag == 0)
+        #expect(txIdConstr.constrFields?.first?.bytesData == Data(repeating: 0x07, count: TRANSACTION_HASH_SIZE))
+        #expect(txInInfo.constrFields?[1].intValue == 3)
+    }
+
+    @Test("minting purpose is Minting(Constr 0) wrapping the policy id")
+    func mintingContext_purposeIsMinting() throws {
+        let policyId = Data(repeating: 0xCC, count: SCRIPT_HASH_SIZE)
+        let body = TransactionBody(inputs: .list([txInput()]), outputs: [], fee: 0)
+        let tx = Transaction(transactionBody: body, transactionWitnessSet: TransactionWitnessSet())
+
+        let ctx = try ScriptContextBuilder().mintingContext(
+            transaction: tx, resolvedInputs: [], policyId: policyId, version: .v2
+        )
+
+        let purpose = try #require(ctx.constrFields?[1])
+        #expect(purpose.constrTag == 0)  // Minting
+        #expect(purpose.constrFields?.first?.bytesData == policyId)
+    }
+
+    // MARK: — TxInfo field counts per version
+
+    @Test("V1 TxInfo has 10 fields, V2 and V3 have 12")
+    func txInfo_fieldCountsByVersion() throws {
+        let input = txInput()
+        let utxo = try scriptUTxO()
+        let body = TransactionBody(inputs: .list([input]), outputs: [], fee: 0)
+        let tx = Transaction(transactionBody: body, transactionWitnessSet: TransactionWitnessSet())
+        let builder = ScriptContextBuilder()
+
+        let v1 = try builder.spendingContext(transaction: tx, spentInput: input, resolvedInputs: [utxo], version: .v1)
+        let v2 = try builder.spendingContext(transaction: tx, spentInput: input, resolvedInputs: [utxo], version: .v2)
+        let v3 = try builder.spendingContext(transaction: tx, spentInput: input, resolvedInputs: [utxo], version: .v3)
+
+        #expect(v1.constrFields?[0].constrFields?.count == 10)
+        #expect(v2.constrFields?[0].constrFields?.count == 12)
+        #expect(v3.constrFields?[0].constrFields?.count == 12)
+    }
+
+    // MARK: — Inputs list
+
+    @Test("resolved inputs appear in the TxInfo inputs list")
+    func txInfo_inputsResolved() throws {
+        let input = txInput()
+        let utxo = try scriptUTxO()
+        let body = TransactionBody(inputs: .list([input]), outputs: [], fee: 0)
+        let tx = Transaction(transactionBody: body, transactionWitnessSet: TransactionWitnessSet())
+
+        let ctx = try ScriptContextBuilder().spendingContext(
+            transaction: tx, spentInput: input, resolvedInputs: [utxo], version: .v2
+        )
+        let inputs = try #require(ctx.constrFields?[0].constrFields?[0].arrayItems)
+        #expect(inputs.count == 1)
+        // Each TxInInfo is Constr(0, [outRef, txOut])
+        #expect(inputs[0].constrTag == 0)
+        #expect(inputs[0].constrFields?.count == 2)
+    }
+
+    @Test("unresolved inputs are dropped from the TxInfo inputs list")
+    func txInfo_unresolvedInputDropped() throws {
+        let input = txInput()
+        let body = TransactionBody(inputs: .list([input]), outputs: [], fee: 0)
+        let tx = Transaction(transactionBody: body, transactionWitnessSet: TransactionWitnessSet())
+
+        // No resolved inputs at all.
+        let ctx = try ScriptContextBuilder().spendingContext(
+            transaction: tx, spentInput: input, resolvedInputs: [], version: .v2
+        )
+        let inputs = try #require(ctx.constrFields?[0].constrFields?[0].arrayItems)
+        #expect(inputs.isEmpty)
+    }
+
+    // MARK: — Fee encoding
+
+    @Test("fee is encoded as a lovelace-only Value map")
+    func txInfo_feeEncoding() throws {
+        let input = txInput()
+        let utxo = try scriptUTxO()
+        let body = TransactionBody(inputs: .list([input]), outputs: [], fee: 170_000)
+        let tx = Transaction(transactionBody: body, transactionWitnessSet: TransactionWitnessSet())
+
+        let ctx = try ScriptContextBuilder().spendingContext(
+            transaction: tx, spentInput: input, resolvedInputs: [utxo], version: .v2
+        )
+        // V2 fee is field index 3.
+        let fee = try #require(ctx.constrFields?[0].constrFields?[3])
+        let outerMap = try #require(fee.mapEntries)
+        let adaInner = try #require(outerMap[emptyBytes]?.mapEntries)
+        #expect(adaInner[emptyBytes]?.intValue == 170_000)
+    }
+
+    // MARK: — Mint encoding
+
+    @Test("empty mint is an empty map")
+    func txInfo_emptyMint() throws {
+        let input = txInput()
+        let utxo = try scriptUTxO()
+        let body = TransactionBody(inputs: .list([input]), outputs: [], fee: 0)
+        let tx = Transaction(transactionBody: body, transactionWitnessSet: TransactionWitnessSet())
+
+        let ctx = try ScriptContextBuilder().spendingContext(
+            transaction: tx, spentInput: input, resolvedInputs: [utxo], version: .v2
+        )
+        let mint = try #require(ctx.constrFields?[0].constrFields?[4])
+        #expect(mint.mapEntries?.isEmpty == true)
+    }
+
+    @Test("mint field carries policy and token amounts, no ADA entry")
+    func txInfo_mintWithAssets() throws {
+        let policyId = ScriptHash(payload: Data(repeating: 0xCC, count: SCRIPT_HASH_SIZE))
+        let assetName = AssetName(from: "TOKEN")
+        let asset = Asset([assetName: 42])
+        let mintAsset = MultiAsset([policyId: asset])
+
+        let input = txInput()
+        let utxo = try scriptUTxO()
+        let body = TransactionBody(inputs: .list([input]), outputs: [], fee: 0, mint: mintAsset)
+        let tx = Transaction(transactionBody: body, transactionWitnessSet: TransactionWitnessSet())
+
+        let ctx = try ScriptContextBuilder().spendingContext(
+            transaction: tx, spentInput: input, resolvedInputs: [utxo], version: .v2
+        )
+        let mint = try #require(ctx.constrFields?[0].constrFields?[4].mapEntries)
+        let csKey = PlutusData.bytes(.byteString(ByteString(bytes: policyId.payload)))
+        // No ADA (empty) key in mint.
+        #expect(mint[emptyBytes] == nil)
+        let tokenMap = try #require(mint[csKey]?.mapEntries)
+        let tnKey = PlutusData.bytes(.byteString(ByteString(bytes: assetName.payload)))
+        #expect(tokenMap[tnKey]?.intValue == 42)
+    }
+
+    // MARK: — Signatories
+
+    @Test("required signers are encoded as signatory bytes")
+    func txInfo_signatories() throws {
+        let signer = VerificationKeyHash(payload: Data(repeating: 0x55, count: VERIFICATION_KEY_HASH_SIZE))
+        let input = txInput()
+        let utxo = try scriptUTxO()
+        let body = TransactionBody(
+            inputs: .list([input]), outputs: [], fee: 0,
+            requiredSigners: .list([signer])
+        )
+        let tx = Transaction(transactionBody: body, transactionWitnessSet: TransactionWitnessSet())
+
+        let ctx = try ScriptContextBuilder().spendingContext(
+            transaction: tx, spentInput: input, resolvedInputs: [utxo], version: .v2
+        )
+        // V2 signatories are field index 8.
+        let signatories = try #require(ctx.constrFields?[0].constrFields?[8].arrayItems)
+        #expect(signatories.count == 1)
+        #expect(signatories[0].bytesData == signer.payload)
+    }
+
+    // MARK: — Outputs / value encoding
+
+    @Test("output value encodes coin under the empty currency symbol and token name")
+    func txOut_valueEncoding() throws {
+        let input = txInput()
+        let utxo = try scriptUTxO(coin: 5_000_000)
+        let output = TransactionOutput(address: try vkeyAddress(), amount: Value(coin: 5_000_000))
+        let body = TransactionBody(inputs: .list([input]), outputs: [output], fee: 0)
+        let tx = Transaction(transactionBody: body, transactionWitnessSet: TransactionWitnessSet())
+
+        let ctx = try ScriptContextBuilder().spendingContext(
+            transaction: tx, spentInput: input, resolvedInputs: [utxo], version: .v2
+        )
+        // V2 outputs are field index 2.
+        let outputs = try #require(ctx.constrFields?[0].constrFields?[2].arrayItems)
+        #expect(outputs.count == 1)
+        // TxOut = Constr(0, [addr, value, outputDatum, maybeRefScript])
+        let txOut = outputs[0]
+        #expect(txOut.constrFields?.count == 4)
+        let value = try #require(txOut.constrFields?[1].mapEntries)
+        let adaInner = try #require(value[emptyBytes]?.mapEntries)
+        #expect(adaInner[emptyBytes]?.intValue == 5_000_000)
+    }
+
+    // MARK: — Address encoding
+
+    @Test("script payment credential uses Constr tag 1; no staking is Nothing")
+    func address_scriptPaymentNoStaking() throws {
+        let input = txInput()
+        let utxo = try scriptUTxO(addrByte: 0x99)
+        let output = TransactionOutput(address: try scriptAddress(0x99), amount: Value(coin: 1))
+        let body = TransactionBody(inputs: .list([input]), outputs: [output], fee: 0)
+        let tx = Transaction(transactionBody: body, transactionWitnessSet: TransactionWitnessSet())
+
+        let ctx = try ScriptContextBuilder().spendingContext(
+            transaction: tx, spentInput: input, resolvedInputs: [utxo], version: .v2
+        )
+        let outputs = try #require(ctx.constrFields?[0].constrFields?[2].arrayItems)
+        let addr = try #require(outputs[0].constrFields?[0])
+        // Address = Constr(0, [paymentCred, maybeStakingCred])
+        let paymentCred = try #require(addr.constrFields?[0])
+        #expect(paymentCred.constrTag == 1)  // ScriptCredential
+        #expect(paymentCred.constrFields?.first?.bytesData == Data(repeating: 0x99, count: SCRIPT_HASH_SIZE))
+        let stakingCred = try #require(addr.constrFields?[1])
+        #expect(stakingCred.constrTag == 1)  // Nothing
+    }
+
+    @Test("vkey payment credential uses Constr tag 0")
+    func address_vkeyPayment() throws {
+        let input = txInput()
+        let utxo = try scriptUTxO()
+        let output = TransactionOutput(address: try vkeyAddress(0x22), amount: Value(coin: 1))
+        let body = TransactionBody(inputs: .list([input]), outputs: [output], fee: 0)
+        let tx = Transaction(transactionBody: body, transactionWitnessSet: TransactionWitnessSet())
+
+        let ctx = try ScriptContextBuilder().spendingContext(
+            transaction: tx, spentInput: input, resolvedInputs: [utxo], version: .v2
+        )
+        let outputs = try #require(ctx.constrFields?[0].constrFields?[2].arrayItems)
+        let paymentCred = try #require(outputs[0].constrFields?[0].constrFields?[0])
+        #expect(paymentCred.constrTag == 0)  // PubKeyCredential
+        #expect(paymentCred.constrFields?.first?.bytesData == Data(repeating: 0x22, count: VERIFICATION_KEY_HASH_SIZE))
+    }
+
+    // MARK: — Output datum (V2)
+
+    @Test("V2 output with no datum is NoOutputDatum (Constr 0)")
+    func txOut_v2_noDatum() throws {
+        let input = txInput()
+        let utxo = try scriptUTxO()
+        let output = TransactionOutput(address: try vkeyAddress(), amount: Value(coin: 1))
+        let body = TransactionBody(inputs: .list([input]), outputs: [output], fee: 0)
+        let tx = Transaction(transactionBody: body, transactionWitnessSet: TransactionWitnessSet())
+
+        let ctx = try ScriptContextBuilder().spendingContext(
+            transaction: tx, spentInput: input, resolvedInputs: [utxo], version: .v2
+        )
+        let outputs = try #require(ctx.constrFields?[0].constrFields?[2].arrayItems)
+        let outputDatum = try #require(outputs[0].constrFields?[2])
+        #expect(outputDatum.constrTag == 0)  // NoOutputDatum
+        #expect(outputDatum.constrFields?.isEmpty == true)
+    }
+
+    @Test("V2 output with inline datum is OutputDatum (Constr 2)")
+    func txOut_v2_inlineDatum() throws {
+        let inlineDatum = PlutusData.bigInt(.int(99))
+        let input = txInput()
+        let utxo = try scriptUTxO()
+        let output = TransactionOutput(
+            address: try vkeyAddress(),
+            amount: Value(coin: 1),
+            datumOption: DatumOption(datum: inlineDatum)
+        )
+        let body = TransactionBody(inputs: .list([input]), outputs: [output], fee: 0)
+        let tx = Transaction(transactionBody: body, transactionWitnessSet: TransactionWitnessSet())
+
+        let ctx = try ScriptContextBuilder().spendingContext(
+            transaction: tx, spentInput: input, resolvedInputs: [utxo], version: .v2
+        )
+        let outputs = try #require(ctx.constrFields?[0].constrFields?[2].arrayItems)
+        let outputDatum = try #require(outputs[0].constrFields?[2])
+        #expect(outputDatum.constrTag == 2)  // OutputDatum
+        #expect(outputDatum.constrFields?.first?.intValue == 99)
+    }
+
+    @Test("V2 output with datum hash is OutputDatumHash (Constr 1)")
+    func txOut_v2_datumHash() throws {
+        let dh = DatumHash(payload: Data(repeating: 0x44, count: DATUM_HASH_SIZE))
+        let input = txInput()
+        let utxo = try scriptUTxO()
+        let output = TransactionOutput(
+            address: try vkeyAddress(),
+            amount: Value(coin: 1),
+            datumOption: DatumOption(datum: dh)
+        )
+        let body = TransactionBody(inputs: .list([input]), outputs: [output], fee: 0)
+        let tx = Transaction(transactionBody: body, transactionWitnessSet: TransactionWitnessSet())
+
+        let ctx = try ScriptContextBuilder().spendingContext(
+            transaction: tx, spentInput: input, resolvedInputs: [utxo], version: .v2
+        )
+        let outputs = try #require(ctx.constrFields?[0].constrFields?[2].arrayItems)
+        let outputDatum = try #require(outputs[0].constrFields?[2])
+        #expect(outputDatum.constrTag == 1)  // OutputDatumHash
+        #expect(outputDatum.constrFields?.first?.bytesData == dh.payload)
+    }
+
+    // MARK: — Output datum (V1)
+
+    @Test("V1 output with no datum hash is Nothing (Constr 1)")
+    func txOut_v1_noDatumHash() throws {
+        let input = txInput()
+        let utxo = try scriptUTxO()
+        let output = TransactionOutput(address: try vkeyAddress(), amount: Value(coin: 1))
+        let body = TransactionBody(inputs: .list([input]), outputs: [output], fee: 0)
+        let tx = Transaction(transactionBody: body, transactionWitnessSet: TransactionWitnessSet())
+
+        let ctx = try ScriptContextBuilder().spendingContext(
+            transaction: tx, spentInput: input, resolvedInputs: [utxo], version: .v1
+        )
+        // V1 outputs are field index 1; TxOut = Constr(0, [addr, value, maybeDatumHash])
+        let outputs = try #require(ctx.constrFields?[0].constrFields?[1].arrayItems)
+        let txOut = outputs[0]
+        #expect(txOut.constrFields?.count == 3)
+        let maybeDatumHash = try #require(txOut.constrFields?[2])
+        #expect(maybeDatumHash.constrTag == 1)  // Nothing
+    }
+
+    @Test("V1 output with a datum hash is Just(Constr 0)")
+    func txOut_v1_withDatumHash() throws {
+        let dh = DatumHash(payload: Data(repeating: 0x66, count: DATUM_HASH_SIZE))
+        let input = txInput()
+        let utxo = try scriptUTxO()
+        let output = TransactionOutput(
+            address: try vkeyAddress(),
+            amount: Value(coin: 1),
+            datumOption: DatumOption(datum: dh)
+        )
+        let body = TransactionBody(inputs: .list([input]), outputs: [output], fee: 0)
+        let tx = Transaction(transactionBody: body, transactionWitnessSet: TransactionWitnessSet())
+
+        let ctx = try ScriptContextBuilder().spendingContext(
+            transaction: tx, spentInput: input, resolvedInputs: [utxo], version: .v1
+        )
+        let outputs = try #require(ctx.constrFields?[0].constrFields?[1].arrayItems)
+        let maybeDatumHash = try #require(outputs[0].constrFields?[2])
+        #expect(maybeDatumHash.constrTag == 0)  // Just
+        #expect(maybeDatumHash.constrFields?.first?.bytesData == dh.payload)
+    }
+
+    // MARK: — ValidRange
+
+    @Test("valid range is the full open interval (-inf, +inf)")
+    func txInfo_validRangeIsFull() throws {
+        let input = txInput()
+        let utxo = try scriptUTxO()
+        let body = TransactionBody(inputs: .list([input]), outputs: [], fee: 0)
+        let tx = Transaction(transactionBody: body, transactionWitnessSet: TransactionWitnessSet())
+
+        let ctx = try ScriptContextBuilder().spendingContext(
+            transaction: tx, spentInput: input, resolvedInputs: [utxo], version: .v2
+        )
+        // V2 validRange is field index 7. Interval = Constr(0, [lowerBound, upperBound])
+        let validRange = try #require(ctx.constrFields?[0].constrFields?[7])
+        #expect(validRange.constrTag == 0)
+        let lower = try #require(validRange.constrFields?[0])  // LowerBound(NegInf, Closed)
+        #expect(lower.constrFields?[0].constrTag == 0)  // NegInf
+        let upper = try #require(validRange.constrFields?[1])  // UpperBound(PosInf, Closed)
+        #expect(upper.constrFields?[0].constrTag == 2)  // PosInf
+    }
+
+    // MARK: — Datums map from witness set
+
+    @Test("witness-set datums populate the datums map keyed by hash")
+    func txInfo_datumsMap() throws {
+        let datum = PlutusData.bigInt(.int(7))
+        let input = txInput()
+        let utxo = try scriptUTxO()
+        let body = TransactionBody(inputs: .list([input]), outputs: [], fee: 0)
+        let witnesses = TransactionWitnessSet(plutusData: .list([datum]))
+        let tx = Transaction(transactionBody: body, transactionWitnessSet: witnesses)
+
+        let ctx = try ScriptContextBuilder().spendingContext(
+            transaction: tx, spentInput: input, resolvedInputs: [utxo], version: .v2
+        )
+        // V2 datums are field index 10.
+        let datums = try #require(ctx.constrFields?[0].constrFields?[10].mapEntries)
+        #expect(datums.count == 1)
+        // The single value is the original datum.
+        #expect(datums.values.first?.intValue == 7)
+    }
+
+    @Test("empty witness set yields an empty datums map")
+    func txInfo_emptyDatumsMap() throws {
+        let input = txInput()
+        let utxo = try scriptUTxO()
+        let body = TransactionBody(inputs: .list([input]), outputs: [], fee: 0)
+        let tx = Transaction(transactionBody: body, transactionWitnessSet: TransactionWitnessSet())
+
+        let ctx = try ScriptContextBuilder().spendingContext(
+            transaction: tx, spentInput: input, resolvedInputs: [utxo], version: .v2
+        )
+        let datums = try #require(ctx.constrFields?[0].constrFields?[10].mapEntries)
+        #expect(datums.isEmpty)
+    }
+}

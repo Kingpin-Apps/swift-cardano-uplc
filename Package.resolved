@@ -1,5 +1,5 @@
 {
-  "originHash" : "1fc10ec64bb1d30e38131036b08df1589ab8bc300310f971b19c19715f34cb68",
+  "originHash" : "b1a87a33cd612783dde1741e9ee210ded628897ab833c26f04c933177e6c540b",
   "pins" : [
     {
       "identity" : "base32",
@@ -60,8 +60,8 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/Kingpin-Apps/swift-blst.git",
       "state" : {
-        "revision" : "d1cbab91dde4389744b3ba4563564787f3d7bb56",
-        "version" : "0.1.6"
+        "revision" : "7ff9e2c24054140b9f6a1f101c4a169bcca8f8cf",
+        "version" : "0.1.7"
       }
     },
     {
@@ -69,8 +69,8 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/Kingpin-Apps/swift-cardano-core.git",
       "state" : {
-        "revision" : "096243346ab6a9e6c5a57992cb1c694a9795dc52",
-        "version" : "0.4.3"
+        "revision" : "5cb18cb2665a7ca5cf99c98d95f432dcd607427d",
+        "version" : "0.4.6"
       }
     },
     {
@@ -141,8 +141,8 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/Kingpin-Apps/swift-nacl.git",
       "state" : {
-        "revision" : "23df3eed6c4a9ac8f906260253604fdb74f7ed7f",
-        "version" : "1.0.1"
+        "revision" : "31015115313f476e068ea57765fb295a2c1a6f01",
+        "version" : "1.0.2"
       }
     },
     {
