@@ -155,8 +155,8 @@ private let crashPronePatterns = [
 /// Run conformance tests for a given version directory (v2 or v3).
 /// Each test is parameterized by the test name derived from the directory structure.
 private func runConformanceTests(version: String, category: String) throws {
-    guard let baseURL = Bundle.module.url(forResource: "Resources/Conformance/\(version)/\(category)", withExtension: nil) else {
-        Issue.record("Could not find Conformance/\(version)/\(category) resource directory")
+    guard let baseURL = Bundle.module.url(forResource: "Resources/conformance/\(version)/\(category)", withExtension: nil) else {
+        Issue.record("Could not find conformance/\(version)/\(category) resource directory")
         return
     }
 
