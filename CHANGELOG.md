@@ -1,3 +1,9 @@
+## 0.3.3 (2026-07-08)
+
+### Fix
+
+- **resources**: remove stray Sources/.../Resources/cz.json (unhandled-file warning)
+
 ## 0.3.2 (2026-06-10)
 
 ### Fix
