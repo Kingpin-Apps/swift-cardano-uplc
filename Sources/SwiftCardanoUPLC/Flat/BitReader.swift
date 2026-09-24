@@ -66,9 +66,15 @@ public struct BitReader: Sendable {
 
     /// Consume the flat filler that precedes byte-array data (bytestrings, strings, CBOR).
     /// Reads zero-padding bits until the first `1` bit is found (the filler terminator),
-    /// leaving the reader byte-aligned. No-op if already on a byte boundary.
+    /// leaving the reader byte-aligned.
+    ///
+    /// The filler is *always* present, including when the reader is already on
+    /// a byte boundary — flat's `preAligned` emits a whole `0x01` byte in that
+    /// case (seven zero bits and the terminating one). Returning early when
+    /// already aligned desynchronises the bit stream by exactly one byte, and
+    /// every term after it decodes as garbage. `consumeEndPadding` below
+    /// handles the same case the same way.
     public mutating func consumeFiller() throws {
-        guard bitIndex != 0 else { return }
         while true {
             let bit = try readBit()
             if bit { return }  // found the `1` filler terminator; now byte-aligned

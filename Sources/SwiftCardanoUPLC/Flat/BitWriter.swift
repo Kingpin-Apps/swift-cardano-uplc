@@ -42,14 +42,16 @@ public struct BitWriter: Sendable {
     /// byte with `0` bits and write a `1` at the final (LSB) position, then
     /// commit the byte so `usedBits` returns to 0.
     ///
-    /// If the stream is already on a byte boundary (`usedBits == 0`) this is a
-    /// no-op — no filler is needed.
+    /// The filler is written *unconditionally*. When the stream is already on
+    /// a byte boundary flat still emits a whole `0x01` byte (seven zero bits
+    /// and the terminating one) — skipping it there produces a stream the
+    /// reference decoder cannot read, and a script whose hash will not match
+    /// what the node computes.
     ///
     /// This must be called before writing byte-array data (bytestrings, strings,
     /// CBOR-encoded data constants) to match the reference flat encoder, which
     /// requires byte-aligned chunk writes.
     public mutating func writeFiller() {
-        guard usedBits != 0 else { return }
         while usedBits < 7 {
             writeBit(false)
         }
