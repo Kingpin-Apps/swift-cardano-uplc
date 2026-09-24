@@ -1,3 +1,13 @@
+## 0.5.0 (2026-09-23)
+
+### Feat
+
+- evaluate reward withdrawal redeemers and emit canonical script context data
+
+### Fix
+
+- compare Plutus Data by value in equalsData, ignoring how it is represented
+
 ## 0.4.0 (2026-09-23)
 
 ### Feat
