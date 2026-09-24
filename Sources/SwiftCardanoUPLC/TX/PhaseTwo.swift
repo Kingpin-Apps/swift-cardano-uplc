@@ -46,11 +46,15 @@ public struct RedeemerResult: Sendable {
 /// Each redeemer gets its own independent `CEKMachine` instance.
 public struct PhaseTwo: @unchecked Sendable {
     private let costModels: [PlutusVersion: CostModel]
+    /// The protocol version the transaction is validated under — see
+    /// ``ScriptContextBuilder/protocolMajorVersion``.
+    private let protocolMajorVersion: Int
 
     /// Primary initializer — caller supplies a cost model used for every
     /// language version.
-    public init(costModel: CostModel) {
+    public init(costModel: CostModel, protocolMajorVersion: Int = 10) {
         self.costModels = [.v1: costModel, .v2: costModel, .v3: costModel]
+        self.protocolMajorVersion = protocolMajorVersion
     }
 
     /// Derive cost models from protocol parameters.
@@ -63,6 +67,7 @@ public struct PhaseTwo: @unchecked Sendable {
     /// - Parameter version: when given, only that version's model is built and
     ///   it is used for every script. Prefer omitting it.
     public init(protocolParameters: ProtocolParameters, version: PlutusVersion? = nil) throws {
+        self.protocolMajorVersion = Int(protocolParameters.protocolVersion.major)
         if let version {
             let model = try CostModel.fromProtocolParams(protocolParameters, version: version)
             self.costModels = [.v1: model, .v2: model, .v3: model]
@@ -96,6 +101,7 @@ public struct PhaseTwo: @unchecked Sendable {
         resolvedInputs: [UTxO]
     ) async throws -> PhaseTwoResult {
         let costModels = self.costModels
+        let protocolMajorVersion = self.protocolMajorVersion
         let redeemers: [Redeemer]
         if let rs = transaction.transactionWitnessSet.redeemers {
             switch rs {
@@ -150,7 +156,8 @@ public struct PhaseTwo: @unchecked Sendable {
                         index: index,
                         transaction: transaction,
                         resolvedInputs: resolvedInputs,
-                        costModels: costModels
+                        costModels: costModels,
+                        protocolMajorVersion: protocolMajorVersion
                     )
                 }
             }
@@ -189,7 +196,8 @@ private func evaluateSingleScript(
     index: Int,
     transaction: Transaction,
     resolvedInputs: [UTxO],
-    costModels: [PlutusVersion: CostModel]
+    costModels: [PlutusVersion: CostModel],
+    protocolMajorVersion: Int
 ) async -> RedeemerResult {
     do {
         let (scriptData, version) = try findScript(
@@ -199,7 +207,8 @@ private func evaluateSingleScript(
         let program = try FlatDecoder().decode(flatBytes)
         let scriptContext = try buildScriptContext(
             for: redeemer, transaction: transaction,
-            resolvedInputs: resolvedInputs, version: version
+            resolvedInputs: resolvedInputs, version: version,
+            protocolMajorVersion: protocolMajorVersion
         )
         let applied = try applyArguments(
             program: program, redeemer: redeemer, scriptContext: scriptContext,
@@ -351,14 +360,108 @@ private func findScript(
         }
         targetHash = credential.hash
 
-    default:
-        throw MachineError.typeError("findScript: redeemer tag \(String(describing: redeemer.tag)) not yet supported")
+    case .cert:
+        // The index counts through the certificates in the order the
+        // transaction lists them.
+        let certificates = body.certificates?.asList ?? []
+        guard redeemer.index < certificates.count else {
+            throw MachineError.typeError(
+                "findScript: certificate redeemer index \(redeemer.index) out of range")
+        }
+        guard let hash = certificateScriptHash(certificates[redeemer.index]) else {
+            throw MachineError.typeError(
+                "findScript: certificate \(redeemer.index) is not witnessed by a script, "
+                + "so it needs a signature rather than a redeemer")
+        }
+        targetHash = hash
+
+    case .voting:
+        let voters = orderedVoters(body.votingProcedures)
+        guard redeemer.index < voters.count else {
+            throw MachineError.typeError(
+                "findScript: vote redeemer index \(redeemer.index) out of range")
+        }
+        guard let hash = voterScriptHash(voters[redeemer.index]) else {
+            throw MachineError.typeError(
+                "findScript: vote redeemer points at a key-credential voter, which needs a "
+                + "signature rather than a script")
+        }
+        targetHash = hash
+
+    case .proposing:
+        // A proposal is witnessed by the guardrails script the constitution
+        // names, which the proposal itself carries as its policy hash.
+        let proposals = body.proposalProcedures?.elementsOrdered ?? []
+        guard redeemer.index < proposals.count else {
+            throw MachineError.typeError(
+                "findScript: proposal redeemer index \(redeemer.index) out of range")
+        }
+        guard let hash = proposalPolicyHash(proposals[redeemer.index]) else {
+            throw MachineError.typeError(
+                "findScript: proposal \(redeemer.index) names no guardrails script, so no "
+                + "script runs for it")
+        }
+        targetHash = hash
+
+    case .none:
+        throw MachineError.typeError("findScript: redeemer has no purpose tag")
     }
 
     guard let found = scriptMap[targetHash] else {
         throw MachineError.typeError("findScript: no script found matching hash \(targetHash.map { String(format: "%02x", $0) }.joined())")
     }
     return found
+}
+
+/// The script hash a certificate is witnessed by, or `nil` when it needs a
+/// signature instead.
+///
+/// Only the credential the certificate acts on can be a script; a pool
+/// certificate is always key-witnessed, and a registration needs no witness at
+/// all.
+private func certificateScriptHash(_ certificate: Certificate) -> Data? {
+    func scriptHash(of credential: some SwiftCardanoCore.Credential) -> Data? {
+        guard case .scriptHash(let hash) = credential.credential else { return nil }
+        return hash.payload
+    }
+    switch certificate {
+        case .stakeDeregistration(let cert): return scriptHash(of: cert.stakeCredential)
+        case .unregister(let cert): return scriptHash(of: cert.stakeCredential)
+        case .stakeDelegation(let cert): return scriptHash(of: cert.stakeCredential)
+        case .voteDelegate(let cert): return scriptHash(of: cert.stakeCredential)
+        case .stakeVoteDelegate(let cert): return scriptHash(of: cert.stakeCredential)
+        case .stakeRegisterDelegate(let cert): return scriptHash(of: cert.stakeCredential)
+        case .voteRegisterDelegate(let cert): return scriptHash(of: cert.stakeCredential)
+        case .stakeVoteRegisterDelegate(let cert): return scriptHash(of: cert.stakeCredential)
+        case .registerDRep(let cert): return scriptHash(of: cert.drepCredential)
+        case .unRegisterDRep(let cert): return scriptHash(of: cert.drepCredential)
+        case .updateDRep(let cert): return scriptHash(of: cert.drepCredential)
+        case .authCommitteeHot(let cert): return scriptHash(of: cert.committeeColdCredential)
+        case .resignCommitteeCold(let cert): return scriptHash(of: cert.committeeColdCredential)
+        case .stakeRegistration, .register, .poolRegistration, .poolRetirement,
+             .genesisKeyDelegation, .moveInstantaneousRewards:
+            return nil
+    }
+}
+
+/// The script hash a voter votes with, or `nil` when the voter signs instead.
+private func voterScriptHash(_ voter: Voter) -> Data? {
+    switch voter.credential {
+        case .constitutionalCommitteeHotScriptHash(let hash): return hash.payload
+        case .drepScriptHash(let hash): return hash.payload
+        case .constitutionalCommitteeHotKeyhash, .drepKeyhash, .stakePoolKeyhash: return nil
+    }
+}
+
+/// The guardrails script a proposal is checked against, when it names one.
+private func proposalPolicyHash(_ proposal: ProposalProcedure) -> Data? {
+    switch proposal.govAction {
+        case .parameterChangeAction(let action): return action.policyHash?.payload
+        case .treasuryWithdrawalsAction(let action): return action.policyHash?.payload
+        case .hardForkInitiationAction, .noConfidence, .updateCommittee,
+             .newConstitution, .infoAction:
+            return nil
+    }
 }
 
 // MARK: — CBOR unwrapping
@@ -387,13 +490,14 @@ private func extractFlatBytes(from scriptData: Data) throws -> Data {
 
 // MARK: — Script context construction
 
-private func buildScriptContext(
+func buildScriptContext(
     for redeemer: Redeemer,
     transaction: Transaction,
     resolvedInputs: [UTxO],
-    version: PlutusVersion
+    version: PlutusVersion,
+    protocolMajorVersion: Int
 ) throws -> PlutusData {
-    let builder = ScriptContextBuilder()
+    let builder = ScriptContextBuilder(protocolMajorVersion: protocolMajorVersion)
     let body = transaction.transactionBody
 
     switch redeemer.tag {
@@ -478,8 +582,49 @@ private func buildScriptContext(
             version: version
         )
 
-    default:
-        throw MachineError.typeError("buildScriptContext: redeemer tag \(String(describing: redeemer.tag)) not yet supported")
+    case .cert:
+        if version == .v3 {
+            return try builder.certifyingContextV3(
+                transaction: transaction,
+                resolvedInputs: resolvedInputs,
+                certificateIndex: redeemer.index,
+                redeemer: redeemer.data
+            )
+        }
+        return try builder.certifyingContext(
+            transaction: transaction,
+            resolvedInputs: resolvedInputs,
+            certificateIndex: redeemer.index,
+            version: version
+        )
+
+    case .voting:
+        guard version == .v3 else {
+            throw MachineError.typeError(
+                "buildScriptContext: voting is a Conway purpose, which PlutusV1 and V2 cannot see")
+        }
+        return try builder.votingContextV3(
+            transaction: transaction,
+            resolvedInputs: resolvedInputs,
+            voterIndex: redeemer.index,
+            redeemer: redeemer.data
+        )
+
+    case .proposing:
+        guard version == .v3 else {
+            throw MachineError.typeError(
+                "buildScriptContext: proposing is a Conway purpose, which PlutusV1 and V2 "
+                + "cannot see")
+        }
+        return try builder.proposingContextV3(
+            transaction: transaction,
+            resolvedInputs: resolvedInputs,
+            proposalIndex: redeemer.index,
+            redeemer: redeemer.data
+        )
+
+    case .none:
+        throw MachineError.typeError("buildScriptContext: redeemer has no purpose tag")
     }
 }
 

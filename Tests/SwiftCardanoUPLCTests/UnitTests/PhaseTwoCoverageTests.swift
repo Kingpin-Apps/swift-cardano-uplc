@@ -155,10 +155,10 @@ struct PhaseTwoCoverageTests {
         #expect(message.contains("no script found"))
     }
 
-    // MARK: — Unsupported redeemer tags
+    // MARK: — Redeemers that point at nothing
 
-    @Test("cert redeemer tag is reported as not yet supported")
-    func certRedeemer_unsupported() async throws {
+    @Test("A certificate redeemer with no certificate to point at is rejected")
+    func certRedeemer_outOfRange() async throws {
         let body = TransactionBody(inputs: .list([input()]), outputs: [], fee: 0)
         let redeemer = Redeemer(tag: .cert, index: 0, data: .bigInt(.int(0)))
         let witnesses = TransactionWitnessSet(redeemers: .list([redeemer]))
@@ -172,7 +172,7 @@ struct PhaseTwoCoverageTests {
             Issue.record("Expected typeError, got \(String(describing: r.error))")
             return
         }
-        #expect(message.contains("not yet supported"))
+        #expect(message.contains("out of range"))
     }
 
     // MARK: — Map-form redeemers

@@ -17,10 +17,19 @@ public enum ScriptContextError: Error, Sendable, Equatable {
 
 /// Builds the `ScriptContext` PlutusData argument passed to each validator script.
 /// Version-sensitive: V1 (Alonzo), V2 (Babbage/Vasil), V3 (Conway).
-///
-/// - Note: V3 is not implemented. See the `.v3` case in `buildTxInfo`.
 public struct ScriptContextBuilder: Sendable {
-    public init() {}
+    /// The protocol version the transaction is validated under.
+    ///
+    /// One field depends on it: a stake registration's deposit was dropped from
+    /// the script context by a bug in the Conway bootstrap (major version 9),
+    /// and because transactions relying on that reached mainnet the ledger
+    /// keeps the behaviour for that version forever. From version 10 on the
+    /// deposit is visible.
+    public let protocolMajorVersion: Int
+
+    public init(protocolMajorVersion: Int = 10) {
+        self.protocolMajorVersion = protocolMajorVersion
+    }
 
     /// Build ScriptContext for a spending script.
     public func spendingContext(
@@ -65,6 +74,27 @@ public struct ScriptContextBuilder: Sendable {
         return buildScriptContext(txInfo: txInfo, purpose: purpose)
     }
 
+    /// Build ScriptContext for a certificate script (V1/V2).
+    public func certifyingContext(
+        transaction: Transaction,
+        resolvedInputs: [UTxO],
+        certificateIndex: Int,
+        version: PlutusVersion = .v2
+    ) throws -> PlutusData {
+        let certificates = transaction.transactionBody.certificates?.asList ?? []
+        guard certificateIndex < certificates.count else {
+            throw ScriptContextError.unsupportedFeature(
+                "Certificate index \(certificateIndex) is out of range for the transaction's "
+                + "\(certificates.count) certificate(s)."
+            )
+        }
+        let txInfo = try buildTxInfo(
+            transaction: transaction, resolvedInputs: resolvedInputs, version: version
+        )
+        let purpose = constr(3, [try certificateDataV1V2(certificates[certificateIndex])])
+        return buildScriptContext(txInfo: txInfo, purpose: purpose)
+    }
+
     // MARK: - PlutusV3
 
     /// Build the PlutusV3 `ScriptContext` for a spending script.
@@ -79,7 +109,11 @@ public struct ScriptContextBuilder: Sendable {
         redeemer: PlutusData,
         datum: PlutusData?
     ) throws -> PlutusData {
-        let txInfo = try buildTxInfoV3(transaction: transaction, resolvedInputs: resolvedInputs)
+        let txInfo = try buildTxInfoV3(
+            transaction: transaction,
+            resolvedInputs: resolvedInputs,
+            protocolMajorVersion: protocolMajorVersion
+        )
         let scriptInfo = PlutusData.constructor(Constr(tag: 1, fields: [
             try outputReferenceV3(spentInput),
             maybeData(datum),
@@ -98,11 +132,102 @@ public struct ScriptContextBuilder: Sendable {
         isScript: Bool = true,
         redeemer: PlutusData
     ) throws -> PlutusData {
-        let txInfo = try buildTxInfoV3(transaction: transaction, resolvedInputs: resolvedInputs)
+        let txInfo = try buildTxInfoV3(
+            transaction: transaction,
+            resolvedInputs: resolvedInputs,
+            protocolMajorVersion: protocolMajorVersion
+        )
         let scriptInfo = PlutusData.constructor(Constr(tag: 2, fields: [
             try credentialData(hash: stakeCredentialHash, isScript: isScript)
         ]))
         return .constructor(Constr(tag: 0, fields: [txInfo, redeemer, scriptInfo]))
+    }
+
+    /// Build the PlutusV3 `ScriptContext` for a certificate script.
+    ///
+    /// `Publishing` is the only purpose besides `Proposing` that carries an
+    /// index: two certificates in one transaction can be identical once the
+    /// ledger has dropped their anchors, so the index is what tells the script
+    /// which of them it is being asked about.
+    public func certifyingContextV3(
+        transaction: Transaction,
+        resolvedInputs: [UTxO],
+        certificateIndex: Int,
+        redeemer: PlutusData
+    ) throws -> PlutusData {
+        let certificates = transaction.transactionBody.certificates?.asList ?? []
+        guard certificateIndex < certificates.count else {
+            throw ScriptContextError.unsupportedFeature(
+                "Certificate index \(certificateIndex) is out of range for the transaction's "
+                + "\(certificates.count) certificate(s)."
+            )
+        }
+        let txInfo = try buildTxInfoV3(
+            transaction: transaction,
+            resolvedInputs: resolvedInputs,
+            protocolMajorVersion: protocolMajorVersion
+        )
+        let scriptInfo = constr(3, [
+            .bigInt(.int(Int64(certificateIndex))),
+            try certificateDataV3(
+                certificates[certificateIndex],
+                protocolMajorVersion: protocolMajorVersion
+            ),
+        ])
+        return constr(0, [txInfo, redeemer, scriptInfo])
+    }
+
+    /// Build the PlutusV3 `ScriptContext` for a voting script.
+    public func votingContextV3(
+        transaction: Transaction,
+        resolvedInputs: [UTxO],
+        voterIndex: Int,
+        redeemer: PlutusData
+    ) throws -> PlutusData {
+        let voters = orderedVoters(transaction.transactionBody.votingProcedures)
+        guard voterIndex < voters.count else {
+            throw ScriptContextError.unsupportedFeature(
+                "Voter index \(voterIndex) is out of range for the transaction's "
+                + "\(voters.count) voter(s)."
+            )
+        }
+        let txInfo = try buildTxInfoV3(
+            transaction: transaction,
+            resolvedInputs: resolvedInputs,
+            protocolMajorVersion: protocolMajorVersion
+        )
+        let scriptInfo = constr(4, [try voterData(voters[voterIndex])])
+        return constr(0, [txInfo, redeemer, scriptInfo])
+    }
+
+    /// Build the PlutusV3 `ScriptContext` for a proposing script — the
+    /// guardrails script named by the constitution.
+    public func proposingContextV3(
+        transaction: Transaction,
+        resolvedInputs: [UTxO],
+        proposalIndex: Int,
+        redeemer: PlutusData
+    ) throws -> PlutusData {
+        let proposals = transaction.transactionBody.proposalProcedures?.elementsOrdered ?? []
+        guard proposalIndex < proposals.count else {
+            throw ScriptContextError.unsupportedFeature(
+                "Proposal index \(proposalIndex) is out of range for the transaction's "
+                + "\(proposals.count) proposal(s)."
+            )
+        }
+        let txInfo = try buildTxInfoV3(
+            transaction: transaction,
+            resolvedInputs: resolvedInputs,
+            protocolMajorVersion: protocolMajorVersion
+        )
+        let scriptInfo = constr(5, [
+            .bigInt(.int(Int64(proposalIndex))),
+            try proposalProcedureData(
+                proposals[proposalIndex],
+                protocolMajorVersion: protocolMajorVersion
+            ),
+        ])
+        return constr(0, [txInfo, redeemer, scriptInfo])
     }
 
     /// Build the PlutusV3 `ScriptContext` for a minting script.
@@ -112,7 +237,11 @@ public struct ScriptContextBuilder: Sendable {
         policyId: Data,
         redeemer: PlutusData
     ) throws -> PlutusData {
-        let txInfo = try buildTxInfoV3(transaction: transaction, resolvedInputs: resolvedInputs)
+        let txInfo = try buildTxInfoV3(
+            transaction: transaction,
+            resolvedInputs: resolvedInputs,
+            protocolMajorVersion: protocolMajorVersion
+        )
         let scriptInfo = PlutusData.constructor(Constr(tag: 0, fields: [
             .bytes(try Bytes(from: policyId))
         ]))
@@ -151,11 +280,6 @@ private func buildTxInfo(
 
     // Refuse what cannot be encoded faithfully rather than substituting an
     // empty value, which silently changes what the script sees.
-    if let certificates = body.certificates, certificates.count > 0 {
-        throw ScriptContextError.unsupportedFeature(
-            "Transactions with certificates are not supported in the script context yet."
-        )
-    }
     if body.ttl != nil || body.validityStart != nil {
         throw ScriptContextError.unsupportedFeature(
             "Transactions with a validity interval are not supported in the script context yet: "
@@ -195,8 +319,8 @@ private func buildTxInfo(
         mint = .map([:])
     }
 
-    // DCert — certificates are refused above, so this is genuinely empty.
-    let dcert = dataList([])
+    // DCert — in the order the transaction lists them.
+    let dcert = dataList(try (body.certificates?.asList ?? []).map { try certificateDataV1V2($0) })
 
     // Withdrawals: `Map StakingCredential Integer` in V1/V2 (V3 keys these by
     // `Credential` instead).
@@ -258,27 +382,13 @@ private func buildTxInfo(
 ///   - `mint` never contains a lovelace entry
 private func buildTxInfoV3(
     transaction: Transaction,
-    resolvedInputs: [UTxO]
+    resolvedInputs: [UTxO],
+    protocolMajorVersion: Int
 ) throws -> PlutusData {
     let body = transaction.transactionBody
 
     // Anything this builder cannot encode faithfully is refused rather than
     // approximated — see `ScriptContextError.unsupportedFeature`.
-    if let certificates = body.certificates, certificates.count > 0 {
-        throw ScriptContextError.unsupportedFeature(
-            "Transactions with certificates are not supported in the V3 script context yet."
-        )
-    }
-    if let votes = body.votingProcedures, !votes.isEmpty {
-        throw ScriptContextError.unsupportedFeature(
-            "Transactions with voting procedures are not supported in the V3 script context yet."
-        )
-    }
-    if let proposals = body.proposalProcedures, proposals.count > 0 {
-        throw ScriptContextError.unsupportedFeature(
-            "Transactions with proposal procedures are not supported in the V3 script context yet."
-        )
-    }
     if body.ttl != nil || body.validityStart != nil {
         // The script context carries POSIX milliseconds, not slots. Converting
         // needs the era history and genesis parameters, which this builder is
@@ -304,7 +414,13 @@ private func buildTxInfoV3(
 
     let mint = body.mint.map { mintValueData($0) } ?? .map([:])
 
-    let certificates = dataList([])
+    // Certificates keep the order the transaction lists them in — a
+    // certificate redeemer's index counts through that same order.
+    let certificates = dataList(
+        try (body.certificates?.asList ?? []).map {
+            try certificateDataV3($0, protocolMajorVersion: protocolMajorVersion)
+        }
+    )
     let withdrawals = try withdrawalsDataV3(body.withdrawals)
     let validRange = buildFullRange()
 
@@ -312,16 +428,25 @@ private func buildTxInfoV3(
         PlutusData.bytes(try Bytes(from: $0.payload))
     })
 
-    let redeemers = try redeemersMapV3(transaction: transaction)
+    let redeemers = try redeemersMapV3(
+        transaction: transaction, protocolMajorVersion: protocolMajorVersion
+    )
     let datums = try buildDatumsMap(witnesses: transaction.transactionWitnessSet)
 
     // Raw bytes in V3, not Constr 0 [bytes].
     let txId = PlutusData.bytes(try Bytes(from: body.id.payload))
 
-    let votes = PlutusData.map([:])
-    let proposals = dataList([])
+    let votes = try votesData(body.votingProcedures)
+    let proposals = dataList(
+        try (body.proposalProcedures?.elementsOrdered ?? []).map {
+            try proposalProcedureData($0, protocolMajorVersion: protocolMajorVersion)
+        }
+    )
     let treasuryAmount = maybeData(body.currentTreasuryAmount.map { .bigInt(.int(Int64($0))) })
-    let treasuryDonation = maybeData(body.treasuryDonation.map { .bigInt(.int(Int64($0.value))) })
+    // A donation of zero is the same as no donation, and the ledger shows it as
+    // `None` rather than `Some 0`.
+    let donated = body.treasuryDonation.map { Int64($0.value) } ?? 0
+    let treasuryDonation = maybeData(donated == 0 ? nil : .bigInt(.int(donated)))
 
     return .constructor(Constr(tag: 0, fields: [
         inputs, referenceInputs, outputs, fee, mint, certificates, withdrawals,
@@ -409,7 +534,7 @@ private func redeemersMapV1V2(transaction: Transaction) throws -> PlutusData {
         $0.payload.lexicographicallyPrecedes($1.payload)
     }
 
-    var pairs: [(purposeTag: Int, key: PlutusData, value: PlutusData)] = []
+    var pairs: [(tag: Int, index: Int, key: PlutusData, value: PlutusData)] = []
     for entry in flattened {
         switch entry.tag {
         case .spend:
@@ -425,7 +550,7 @@ private func redeemersMapV1V2(transaction: Transaction) throws -> PlutusData {
             let outRef = PlutusData.constructor(Constr(tag: 0, fields: [
                 txId, .bigInt(.int(Int64(input.index)))
             ]))
-            pairs.append((1, .constructor(Constr(tag: 1, fields: [outRef])), entry.data))
+            pairs.append((0, entry.index, constr(1, [outRef]), entry.data))
         case .mint:
             guard entry.index < sortedPolicies.count else {
                 throw ScriptContextError.unsupportedFeature(
@@ -435,7 +560,20 @@ private func redeemersMapV1V2(transaction: Transaction) throws -> PlutusData {
             let purpose = PlutusData.constructor(Constr(tag: 0, fields: [
                 .bytes(try Bytes(from: sortedPolicies[entry.index].payload))
             ]))
-            pairs.append((0, purpose, entry.data))
+            pairs.append((1, entry.index, purpose, entry.data))
+        case .cert:
+            let certificates = body.certificates?.asList ?? []
+            guard entry.index < certificates.count else {
+                throw ScriptContextError.unsupportedFeature(
+                    "Certificate redeemer index \(entry.index) is out of range for the "
+                    + "transaction's certificates."
+                )
+            }
+            // V1 and V2 name this purpose `Certifying`, and it carries only the
+            // certificate — no index, because none of the certificates they can
+            // describe has an anchor that would make two of them look alike.
+            let purpose = constr(3, [try certificateDataV1V2(certificates[entry.index])])
+            pairs.append((2, entry.index, purpose, entry.data))
         case .reward:
             let entries = orderedWithdrawalCredentials(body.withdrawals)
             guard entry.index < entries.count else {
@@ -445,26 +583,24 @@ private func redeemersMapV1V2(transaction: Transaction) throws -> PlutusData {
             }
             let credential = entries[entry.index]
             let inner = try credentialData(hash: credential.hash, isScript: credential.isScript)
-            let purpose = PlutusData.constructor(Constr(tag: 2, fields: [
-                .constructor(Constr(tag: 0, fields: [inner]))
-            ]))
-            pairs.append((2, purpose, entry.data))
+            let purpose = constr(2, [constr(0, [inner])])
+            pairs.append((3, entry.index, purpose, entry.data))
         default:
             throw ScriptContextError.unsupportedFeature(
-                "Redeemer purpose \(String(describing: entry.tag)) is not supported in the "
-                + "script context yet."
+                "Redeemer purpose \(String(describing: entry.tag)) has no PlutusV1 or V2 "
+                + "representation; the ledger rejects a transaction that uses one alongside a "
+                + "V1 or V2 script."
             )
         }
     }
 
-    let sorted = try pairs.sorted { lhs, rhs in
-        if lhs.purposeTag != rhs.purposeTag { return lhs.purposeTag < rhs.purposeTag }
-        return try lhs.key.toCBORData().lexicographicallyPrecedes(rhs.key.toCBORData())
-    }
-
     var map = OrderedDictionary<PlutusData, PlutusData>()
-    for pair in sorted { map[pair.key] = pair.value }
-    return .map(map)
+    for pair in pairs.sorted(by: {
+        $0.tag != $1.tag ? $0.tag < $1.tag : $0.index < $1.index
+    }) {
+        map[pair.key] = pair.value
+    }
+    return map.isEmpty ? .map([:]) : .map(map)
 }
 
 /// `OutputReference { transaction_id: ByteString, output_index: Int }`.
@@ -517,9 +653,24 @@ func orderedWithdrawalCredentials(_ withdrawals: Withdrawals?) -> [WithdrawalCre
     }
 }
 
+/// A Plutus constructor, spelled out once so the encoders below read as the
+/// shapes they are building rather than as `Constr` bookkeeping.
+func constr(_ tag: UInt64, _ fields: [PlutusData]) -> PlutusData {
+    .constructor(Constr(tag: tag, fields: fields))
+}
+
 /// `Credential` — `VerificationKey` is constructor 0, `Script` is 1.
-private func credentialData(hash: Data, isScript: Bool) throws -> PlutusData {
-    .constructor(Constr(tag: isScript ? 1 : 0, fields: [.bytes(try Bytes(from: hash))]))
+func credentialData(hash: Data, isScript: Bool) throws -> PlutusData {
+    constr(isScript ? 1 : 0, [.bytes(try Bytes(from: hash))])
+}
+
+func credentialData(_ credential: some SwiftCardanoCore.Credential) throws -> PlutusData {
+    switch credential.credential {
+        case .verificationKeyHash(let hash):
+            return try credentialData(hash: hash.payload, isScript: false)
+        case .scriptHash(let hash):
+            return try credentialData(hash: hash.payload, isScript: true)
+    }
 }
 
 /// `withdrawals: Pairs<Credential, Lovelace>` for V3.
@@ -534,8 +685,18 @@ private func withdrawalsDataV3(_ withdrawals: Withdrawals?) throws -> PlutusData
     return .map(map)
 }
 
-/// `redeemers: Pairs<ScriptPurpose, Redeemer>`, ordered by ascending purpose.
-private func redeemersMapV3(transaction: Transaction) throws -> PlutusData {
+/// `redeemers: Pairs<ScriptPurpose, Redeemer>`.
+///
+/// The order is the ledger's, which keys its redeemers by *its* purpose type
+/// and not by Plutus's: spend, then mint, then certificate, then withdrawal,
+/// then vote, then proposal, and within each by index. That is exactly the
+/// order the redeemers appear in on the wire, so it comes out of a plain sort
+/// by tag and index — sorting by the Plutus constructor number instead would
+/// put minting first and hand the script a different map.
+private func redeemersMapV3(
+    transaction: Transaction,
+    protocolMajorVersion: Int
+) throws -> PlutusData {
     let body = transaction.transactionBody
     guard let redeemers = transaction.transactionWitnessSet.redeemers else { return .map([:]) }
 
@@ -557,8 +718,9 @@ private func redeemersMapV3(transaction: Transaction) throws -> PlutusData {
         $0.payload.lexicographicallyPrecedes($1.payload)
     }
 
-    var pairs: [(purposeTag: Int, key: PlutusData, value: PlutusData)] = []
+    var pairs: [(tag: Int, index: Int, key: PlutusData, value: PlutusData)] = []
     for entry in flattened {
+        let purpose: PlutusData
         switch entry.tag {
         case .spend:
             guard entry.index < sortedInputs.count else {
@@ -566,54 +728,106 @@ private func redeemersMapV3(transaction: Transaction) throws -> PlutusData {
                     "Spend redeemer index \(entry.index) is out of range for the transaction's inputs."
                 )
             }
-            let purpose = PlutusData.constructor(Constr(tag: 1, fields: [
-                try outputReferenceV3(sortedInputs[entry.index])
-            ]))
-            pairs.append((1, purpose, entry.data))
+            purpose = constr(1, [try outputReferenceV3(sortedInputs[entry.index])])
         case .mint:
             guard entry.index < sortedPolicies.count else {
                 throw ScriptContextError.unsupportedFeature(
                     "Mint redeemer index \(entry.index) is out of range for the transaction's mint field."
                 )
             }
-            let purpose = PlutusData.constructor(Constr(tag: 0, fields: [
-                .bytes(try Bytes(from: sortedPolicies[entry.index].payload))
-            ]))
-            pairs.append((0, purpose, entry.data))
+            purpose = constr(0, [.bytes(try Bytes(from: sortedPolicies[entry.index].payload))])
+        case .cert:
+            let certificates = body.certificates?.asList ?? []
+            guard entry.index < certificates.count else {
+                throw ScriptContextError.unsupportedFeature(
+                    "Certificate redeemer index \(entry.index) is out of range for the "
+                    + "transaction's certificates."
+                )
+            }
+            purpose = constr(3, [
+                .bigInt(.int(Int64(entry.index))),
+                try certificateDataV3(
+                    certificates[entry.index], protocolMajorVersion: protocolMajorVersion
+                ),
+            ])
         case .reward:
-            let entries = orderedWithdrawalCredentials(body.withdrawals)
-            guard entry.index < entries.count else {
+            let credentials = orderedWithdrawalCredentials(body.withdrawals)
+            guard entry.index < credentials.count else {
                 throw ScriptContextError.unsupportedFeature(
                     "Reward redeemer index \(entry.index) is out of range for the transaction's withdrawals."
                 )
             }
-            let credential = entries[entry.index]
-            let purpose = PlutusData.constructor(Constr(tag: 2, fields: [
+            let credential = credentials[entry.index]
+            purpose = constr(2, [
                 try credentialData(hash: credential.hash, isScript: credential.isScript)
-            ]))
-            pairs.append((2, purpose, entry.data))
-        default:
+            ])
+        case .voting:
+            let voters = orderedVoters(body.votingProcedures)
+            guard entry.index < voters.count else {
+                throw ScriptContextError.unsupportedFeature(
+                    "Vote redeemer index \(entry.index) is out of range for the transaction's voters."
+                )
+            }
+            purpose = constr(4, [try voterData(voters[entry.index])])
+        case .proposing:
+            let proposals = body.proposalProcedures?.elementsOrdered ?? []
+            guard entry.index < proposals.count else {
+                throw ScriptContextError.unsupportedFeature(
+                    "Proposal redeemer index \(entry.index) is out of range for the "
+                    + "transaction's proposals."
+                )
+            }
+            purpose = constr(5, [
+                .bigInt(.int(Int64(entry.index))),
+                try proposalProcedureData(
+                    proposals[entry.index], protocolMajorVersion: protocolMajorVersion
+                ),
+            ])
+        case .none:
             throw ScriptContextError.unsupportedFeature(
-                "Redeemer purpose \(String(describing: entry.tag)) is not supported in the "
-                + "V3 script context yet."
+                "A redeemer without a purpose tag cannot be placed in the script context."
             )
         }
-    }
-
-    // ScriptPurpose ordering follows the constructor order (Minting, Spending,
-    // Rewarding, Certifying, Voting, Proposing), then the encoded payload.
-    let sorted = try pairs.sorted { lhs, rhs in
-        if lhs.purposeTag != rhs.purposeTag { return lhs.purposeTag < rhs.purposeTag }
-        return try lhs.key.toCBORData().lexicographicallyPrecedes(rhs.key.toCBORData())
+        pairs.append((redeemerTagOrder(entry.tag), entry.index, purpose, entry.data))
     }
 
     var map = OrderedDictionary<PlutusData, PlutusData>()
-    for pair in sorted { map[pair.key] = pair.value }
-    return .map(map)
+    for pair in pairs.sorted(by: {
+        $0.tag != $1.tag ? $0.tag < $1.tag : $0.index < $1.index
+    }) {
+        map[pair.key] = pair.value
+    }
+    return map.isEmpty ? .map([:]) : .map(map)
+}
+
+/// A redeemer tag's place in the ledger's ordering, which is the number it
+/// carries on the wire.
+private func redeemerTagOrder(_ tag: RedeemerTag?) -> Int {
+    switch tag {
+        case .spend: return 0
+        case .mint: return 1
+        case .cert: return 2
+        case .reward: return 3
+        case .voting: return 4
+        case .proposing: return 5
+        case .none: return 6
+    }
+}
+
+/// The transaction's voters, in the ledger's order. A vote redeemer's index
+/// counts through this same order.
+func orderedVoters(_ procedures: VotingProcedures?) -> [Voter] {
+    guard let procedures else { return [] }
+    return procedures.voters.sorted { lhs, rhs in
+        let (lhsKey, rhsKey) = (voterSortKey(lhs), voterSortKey(rhs))
+        if lhsKey.role != rhsKey.role { return lhsKey.role < rhsKey.role }
+        if lhsKey.isKey != rhsKey.isKey { return !lhsKey.isKey }
+        return lhsKey.hash.lexicographicallyPrecedes(rhsKey.hash)
+    }
 }
 
 /// `Option<a>` — `Some` is constructor 0, `None` is constructor 1.
-private func maybeData(_ value: PlutusData?) -> PlutusData {
+func maybeData(_ value: PlutusData?) -> PlutusData {
     guard let value else { return .constructor(Constr(tag: 1, fields: [])) }
     return .constructor(Constr(tag: 0, fields: [value]))
 }
