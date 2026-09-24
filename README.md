@@ -180,10 +180,21 @@ checked against the ledger's own, byte for byte — the fixtures under
 `Tests/.../Resources/ledgercontext` hold contexts taken from a synced node, and
 their README says how to make more.
 
-A transaction with a validity interval is still refused rather than approximated,
-because turning slots into POSIX milliseconds needs era history this library is not
-given, and an unbounded interval would quietly defeat every deadline check in the
-script.
+A script sees a transaction's validity interval as POSIX milliseconds while the
+transaction states it in slots, so pass a `SlotTimeline` — `.mainnet` and its
+siblings cover the public networks, and `SlotTimeline(systemStart:eraHistory:)`
+reads whatever a node reports. Without one, a transaction that has an interval is
+refused rather than handed an unbounded one, which would quietly defeat every
+deadline check the script makes.
+
+PlutusV1, V2 and V3 all have their contexts checked against the ledger's, byte for
+byte. V1 and V2 are not a smaller V3 — among other things their mint field always
+carries a zero-ada entry, their withdrawals come in the opposite credential order,
+and V1 holds its withdrawals and datums as lists of pairs rather than maps.
+
+Real mainnet transactions are checked against the units they declare on chain, in
+`MainnetExUnitsTests` — which is what caught V1 and V2 being priced by the wrong
+builtin semantics variant.
 
 ---
 

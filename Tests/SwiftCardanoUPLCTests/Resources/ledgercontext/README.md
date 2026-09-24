@@ -72,3 +72,19 @@ redeemer, or label the fixture with the one the error names.
 - `protocolMajorVersion` — a stake registration's deposit is hidden from the
   script at version 9 and visible from 10 on.
 - `expectedContext` — the ledger's CBOR, hex-encoded.
+
+## PlutusV1 and V2
+
+Aiken only emits PlutusV3, so the V1 and V2 fixtures use a hand-built UPLC 1.0.0
+program that always fails — `(program 1.0.0 (error))`, which flat-encodes to
+`01000061` and goes in an envelope as `454401000061`. V3 uses UPLC 1.1.0, which V1
+and V2 reject, so the Aiken script cannot stand in for them.
+
+The ledger reports a V1 or V2 spending script's arguments as a CBOR **list** of
+datum, redeemer and context, where a V3 script takes the context alone and the
+ledger prints it bare. The fixtures store only the context — its last element.
+
+A V1 or V2 fixture is worth writing for anything the two hold differently from V3,
+which is more than it looks: the field count, the fee's shape, the mint's zero-ada
+entry, whether withdrawals and datums are maps or lists of pairs, and the order
+those come in.

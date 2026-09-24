@@ -1,6 +1,7 @@
 import Testing
 import BigInt
 import Foundation
+import SwiftCardanoCore
 @testable import SwiftCardanoUPLC
 
 @Suite("Flat Encoding")
@@ -248,5 +249,27 @@ struct FlatEncodingTests {
         // Verify it evaluates without error (the program is a lambda, so result is a value)
         var machine = CEKMachine(budget: .unlimited, costModel: .placeholder())
         _ = try machine.run(ndb)
+    }
+
+    /// The always-failing program used to generate the PlutusV1 and V2 ledger
+    /// context fixtures. PlutusV1 and V2 only accept UPLC 1.0.0, so the fixtures
+    /// could not reuse Aiken's output (it emits 1.1.0, for V3 only) — the script
+    /// was built with this encoder instead, and `cardano-cli` accepted these
+    /// exact bytes as a V1 and a V2 script. Pinning them keeps that agreement.
+    @Test func encodeAlwaysFailingV1Program() throws {
+        let program = DeBruijnProgram(version: (1, 0, 0), term: .error)
+        let flat = try FlatEncoder().encode(program)
+        #expect(flat.toHex == "01000061")
+
+        // On the wire a script is the flat bytes inside one CBOR byte string;
+        // a text envelope wraps that byte string again.
+        let inner = try Primitive.bytes(flat).toCBORData()
+        #expect(inner.toHex == "4401000061")
+        let envelope = try Primitive.bytes(inner).toCBORData()
+        #expect(envelope.toHex == "454401000061")
+
+        let back = try FlatDecoder().decode(flat)
+        #expect(back.version == (1, 0, 0))
+        if case .error = back.term {} else { Issue.record("Expected error term, got \(back.term)") }
     }
 }

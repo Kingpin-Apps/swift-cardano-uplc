@@ -82,19 +82,82 @@ PlutusV1 and V2 predate Conway and see only the five Shelley certificates. A
 transaction that carries a Conway-only certificate alongside a V1 or V2 script is
 rejected by the ledger, and rejected here too rather than approximated.
 
+### Validity intervals
+
+A script sees a transaction's validity interval as POSIX milliseconds, but a
+transaction states it in slots — so evaluating one needs to know when the chain's
+slots happen. That is what `SlotTimeline` is for:
+
+```swift
+let phaseTwo = try PhaseTwo(protocolParameters: pp, slotTimeline: .mainnet)
+```
+
+Slots are not a uniform grid. Mainnet's Byron era ran on twenty-second slots and
+everything since Shelley runs on one-second slots, so reading a present-day slot
+as `systemStart + slot` puts it about two and a half years early. `SlotTimeline`
+knows the boundaries; `SlotTimeline(systemStart:eraHistory:)` reads them from
+whatever a node reports, for a network it has no built-in answer for.
+
+The interval keeps the asymmetry a transaction's own bounds have. `invalid_before`
+includes its slot and becomes a **closed** lower bound; `invalid_hereafter`
+excludes its and becomes a **strict** upper one. A script comparing against a
+deadline therefore sees the first instant the transaction is no longer valid,
+not the last one it is.
+
+Without a timeline, a transaction that has an interval is refused rather than
+handed the unbounded one — which would quietly defeat every deadline check the
+script makes.
+
 ### Transactions the script context cannot represent
 
 A context that is subtly wrong makes a correct script look broken, so the builder
 refuses rather than approximating. ``ScriptContextError/unsupportedFeature(_:)`` is
-raised for a transaction with a validity interval — converting slots to POSIX
-milliseconds needs the era history and genesis parameters the builder is not
-given, and substituting the unbounded interval would quietly defeat every
-deadline check in the script — and for a spending input missing from
-`resolvedInputs`, since dropping it would show the script a transaction that
-spends less than the real one.
+raised for a spending input missing from `resolvedInputs`, since dropping it would
+show the script a transaction that spends less than the real one, and for a
+validity interval with no ``SlotTimeline`` to read it with.
 
 Pass every input the transaction references, including reference inputs: a script
 spending through a reference script has no script in its witness set at all.
+
+### What V1 and V2 see
+
+V1 and V2 do not see a smaller V3 context, they see a different one, and the
+differences are easy to miss:
+
+| | V1 | V2 | V3 |
+|---|---|---|---|
+| `TxInfo` fields | 10 | 12 | 16 |
+| `fee` | a `Value` | a `Value` | an integer |
+| `id` | `Constr 0 [bytes]` | same | raw bytes |
+| `mint` | carries a **zero-ada entry**, always | same | never has one |
+| `withdrawals` | a list of pairs | a map | a map |
+| `datums` | a list of pairs | a map | a map |
+| `redeemers` | *absent* | a map | a map |
+| an output's datum | a `Maybe` hash | `OutputDatum` | `OutputDatum` |
+| certificates | the smaller `DCert` | same | `TxCert` |
+
+Two orderings are worth calling out, because a context can hold both at once:
+
+- **Withdrawals** reach a V1 or V2 script in *Plutus's* credential order, which
+  puts a key credential before a script one, and a V3 script in the *ledger's*,
+  which is the reverse. A reward redeemer's *index* counts in the ledger's order
+  in all three, because that is what the redeemer pointer is resolved against.
+- **Datums** are ordered by datum hash, not by the order the witness set lists
+  them in.
+
+### How a builtin is priced depends on the protocol version
+
+Plutus calls this a builtin semantics *variant*, and it depends on the language
+and the protocol version together: V1 and V2 are priced by variant A up to the
+Chang hard fork and variant B since, while V3 uses variant C. Variant B charges
+`multiplyInteger` by the *product* of its argument sizes where A charges by their
+*sum*, and prices `verifyEd25519Signature` by the size of the message rather than
+the signature.
+
+Plutus also defines variants D and E for a later hard fork. They are deliberately
+not used here: mainnet at major version 11 still prices V3 by variant C, which a
+transaction calling `divideInteger` nine times and `modInteger` nineteen times
+confirms to the step.
 
 ### Checking the context against the ledger
 
@@ -108,6 +171,14 @@ Matching execution units is a much weaker check, and it is worth knowing why: th
 budget only reflects the parts of the context a script actually looks at, so a
 field in the wrong order or missing outright costs nothing and goes unnoticed. The
 redeemer map was in the wrong order while every budget still matched exactly.
+
+Units are still worth checking, from the other end. `MainnetExUnitsTests` runs real
+mainnet transactions and compares against the units they declare on chain — the
+budget the ledger actually charged. A byte-exact context and a matching budget
+together cover both the context and the machine that runs on it, and they catch
+different things: the cost-model conformance corpus only pins V3, so V1 and V2
+being priced by the wrong semantics variant showed up nowhere until a real
+withdrawal script came out a flat 4,152 steps over.
 
 ### Execution budgets
 
