@@ -1,3 +1,15 @@
+## 0.4.0 (2026-09-23)
+
+### Feat
+
+- build the chain's real cost model from protocol parameters and charge builtins
+- build the PlutusV3 script context and populate reference inputs, withdrawals and redeemers
+
+### Fix
+
+- cost each script with its own Plutus version and surface setup failures
+- always write and consume the flat preAligned filler, even when byte-aligned
+
 ## 0.3.4 (2026-09-22)
 
 ### Fix
