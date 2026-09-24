@@ -134,6 +134,7 @@ public struct CostModel: Sendable {
         _ params: ProtocolParameters,
         version: PlutusVersion = .v2
     ) throws -> CostModel {
+        let protocolMajorVersion = Int(params.protocolVersion.major)
         let languageId: Int
         let names: [String]
         switch version {
@@ -152,17 +153,22 @@ public struct CostModel: Sendable {
         var table = [String: Int64](minimumCapacity: values.count)
         for (name, value) in zip(names, values) { table[name] = value }
 
-        return try fromParameters(table, version: version, supplied: values.count)
+        return try fromParameters(table, version: version, supplied: values.count, protocolMajorVersion: protocolMajorVersion)
     }
 
     /// Build a cost model from cost-model parameters keyed by name.
     ///
     /// This is the form the Plutus cost-model data files use; protocol
     /// parameters are the same values positionally.
+    /// - Parameter protocolMajorVersion: decides which builtin semantics variant
+    ///   prices the language — see ``builtinCosts(version:protocolMajorVersion:_:)``.
+    ///   Defaults to Chang, the first version Conway transactions are validated
+    ///   under.
     public static func fromParameters(
         _ table: [String: Int64],
         version: PlutusVersion,
-        supplied: Int? = nil
+        supplied: Int? = nil,
+        protocolMajorVersion: Int = 9
     ) throws -> CostModel {
         var missing: [String] = []
         let lookup: (String) -> Int64 = { name in
@@ -212,9 +218,9 @@ public struct CostModel: Sendable {
         }
 
         missing.removeAll()
-        var builtinCosts = version == .v3
-            ? builtinCostsVariantC(lookup)
-            : builtinCostsVariantA(lookup)
+        var builtinCosts = builtinCosts(
+            version: version, protocolMajorVersion: protocolMajorVersion, lookup
+        )
 
         // A cost model from an older chain does not name the parameters of
         // builtins that did not exist yet. Those builtins are simply not

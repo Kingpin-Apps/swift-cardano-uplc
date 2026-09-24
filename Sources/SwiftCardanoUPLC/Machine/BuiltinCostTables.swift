@@ -368,6 +368,65 @@ extension CostModel {
     }
 
     /// Builtin costing functions for PlutusV3 (semantics variant C).
+    /// Variant B: what PlutusV1 and V2 are priced by from the Chang hard fork
+    /// (major protocol version 9) onwards.
+    ///
+    /// It is variant A with two cpu formulas changed. `multiplyInteger` moves from
+    /// the sum of its argument sizes to their product, and
+    /// `verifyEd25519Signature` from the size of the signature to the size of the
+    /// message. Pricing a V1 or V2 script with variant A on a Chang-or-later chain
+    /// overcharges every `multiplyInteger` by one slope — the difference that
+    /// showed up as a flat 4,152 steps on a mainnet withdrawal script.
+    static func builtinCostsVariantB(_ p: (String) -> Int64) -> [DefaultFunction: BuiltinCostingFunction] {
+        var table = builtinCostsVariantA(p)
+        table[.multiplyInteger] = BuiltinCostingFunction(
+            cpu: .multipliedSizes(
+                intercept: p("multiplyInteger-cpu-arguments-intercept"),
+                slope: p("multiplyInteger-cpu-arguments-slope")
+            ),
+            memory: .addedSizes(
+                intercept: p("multiplyInteger-memory-arguments-intercept"),
+                slope: p("multiplyInteger-memory-arguments-slope")
+            )
+        )
+        table[.verifyEd25519Signature] = BuiltinCostingFunction(
+            cpu: .linearInY(
+                intercept: p("verifyEd25519Signature-cpu-arguments-intercept"),
+                slope: p("verifyEd25519Signature-cpu-arguments-slope")
+            ),
+            memory: .constant(p("verifyEd25519Signature-memory-arguments"))
+        )
+        return table
+    }
+
+    /// The costing functions for a language at a protocol version.
+    ///
+    /// Plutus calls these builtin *semantics variants*, and which one applies
+    /// depends on both the language and the protocol version. V1 and V2 used
+    /// variant A up to the Chang hard fork and variant B since; V3, which only
+    /// exists from Chang, uses variant C.
+    ///
+    /// Plutus also defines variants D and E for a later hard fork, changing how
+    /// `divideInteger` and `modInteger` are priced. Those are deliberately not
+    /// used here: mainnet at major version 11 still prices V3 by variant C, which
+    /// a transaction calling `divideInteger` nine times and `modInteger` nineteen
+    /// times confirms to the step. Adding D and E before a chain uses them would
+    /// make every such budget wrong.
+    static func builtinCosts(
+        version: PlutusVersion,
+        protocolMajorVersion: Int,
+        _ p: (String) -> Int64
+    ) -> [DefaultFunction: BuiltinCostingFunction] {
+        switch version {
+            case .v3:
+                return builtinCostsVariantC(p)
+            case .v1, .v2:
+                return protocolMajorVersion < 9
+                    ? builtinCostsVariantA(p)
+                    : builtinCostsVariantB(p)
+        }
+    }
+
     static func builtinCostsVariantC(_ p: (String) -> Int64) -> [DefaultFunction: BuiltinCostingFunction] {
         [
         .addInteger: BuiltinCostingFunction(
