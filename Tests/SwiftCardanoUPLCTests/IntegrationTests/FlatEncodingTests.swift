@@ -97,7 +97,7 @@ struct FlatEncodingTests {
             DeBruijnProgram(version: decoded.version,
                             term: converter.convertFromNamed(decoded).term)
         )
-        var machine = CEKMachine(budget: .unlimited, costModel: .defaultV2())
+        var machine = CEKMachine(budget: .unlimited, costModel: .placeholder())
         let result = try machine.run(ndb)
         if case .constant(.integer(let n)) = result.term {
             #expect(n == 99)
@@ -246,7 +246,7 @@ struct FlatEncodingTests {
         let ndb = try DeBruijnConverter().convertToNamed(db)
 
         // Verify it evaluates without error (the program is a lambda, so result is a value)
-        var machine = CEKMachine(budget: .unlimited, costModel: .defaultV2())
+        var machine = CEKMachine(budget: .unlimited, costModel: .placeholder())
         _ = try machine.run(ndb)
     }
 }

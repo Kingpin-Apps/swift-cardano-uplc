@@ -111,7 +111,7 @@ private func evaluateFile(_ code: String) -> TestOutcome {
         return .evaluationFailure
     }
 
-    var machine = CEKMachine(budget: .unlimited, costModel: .defaultV2())
+    var machine = CEKMachine(budget: .unlimited, costModel: .placeholder())
     let result: EvalResult
     do {
         result = try machine.run(ndbProgram)

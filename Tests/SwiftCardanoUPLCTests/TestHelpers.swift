@@ -13,7 +13,7 @@ func evalUPLC(_ source: String) throws -> Term<NamedDeBruijn> {
     let converter = DeBruijnConverter()
     let dbProgram = try converter.convert(namedProgram)
     let ndbProgram = try converter.convertToNamed(dbProgram)
-    var machine = CEKMachine(budget: .unlimited, costModel: .defaultV2())
+    var machine = CEKMachine(budget: .unlimited, costModel: .placeholder())
     let result = try machine.run(ndbProgram)
     return result.term
 }
@@ -25,7 +25,7 @@ func evalUPLCFull(_ source: String) throws -> EvalResult {
     let converter = DeBruijnConverter()
     let dbProgram = try converter.convert(namedProgram)
     let ndbProgram = try converter.convertToNamed(dbProgram)
-    var machine = CEKMachine(budget: .unlimited, costModel: .defaultV2())
+    var machine = CEKMachine(budget: .unlimited, costModel: .placeholder())
     return try machine.run(ndbProgram)
 }
 

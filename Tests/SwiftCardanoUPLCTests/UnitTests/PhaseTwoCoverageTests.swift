@@ -33,7 +33,7 @@ private func utxo(_ in0: TransactionInput, address: Address, coin: Int64 = 2_000
 }
 
 private func phaseTwo() -> PhaseTwo {
-    PhaseTwo(costModel: .defaultV2())
+    PhaseTwo(costModel: .placeholder())
 }
 
 @Suite("PhaseTwo — additional coverage")
@@ -177,7 +177,7 @@ struct PhaseTwoCoverageTests {
 
     // MARK: — Map-form redeemers
 
-    @Test("map-form redeemers are evaluated (tag-less) and reported as unsupported")
+    @Test("map-form redeemers keep the tag and index from their key")
     func mapFormRedeemers_areEvaluated() async throws {
         var redeemerMap = RedeemerMap()
         redeemerMap[RedeemerKey(tag: .mint, index: 0)] =
@@ -191,12 +191,39 @@ struct PhaseTwoCoverageTests {
         #expect(result.redeemers.count == 1)
         #expect(!result.success)
         let r = try #require(result.redeemers.first)
-        // Map-form redeemers lose their tag, so findScript rejects the nil tag.
+        // The mint tag survives the map encoding, so findScript takes the mint
+        // branch and fails on the absent mint field rather than on a nil tag.
         guard case .typeError(let message) = r.error else {
             Issue.record("Expected typeError, got \(String(describing: r.error))")
             return
         }
-        #expect(message.contains("not yet supported"))
+        #expect(message.contains("mint redeemer but no mint field"))
+        #expect(!message.contains("not yet supported"))
+    }
+
+    @Test("map-form spend redeemers resolve their input via the key's index")
+    func mapFormSpendRedeemers_useKeyIndex() async throws {
+        // Two inputs; the redeemer key points at index 1. If the index were
+        // dropped, this would resolve input 0 instead.
+        let in0 = input(0x01)
+        let in1 = input(0x02)
+        var redeemerMap = RedeemerMap()
+        redeemerMap[RedeemerKey(tag: .spend, index: 1)] =
+            RedeemerValue(data: .bigInt(.int(0)), exUnits: ExecutionUnits(mem: 1, steps: 1))
+        let body = TransactionBody(inputs: .list([in0, in1]), outputs: [], fee: 0)
+        let witnesses = TransactionWitnessSet(redeemers: .map(redeemerMap))
+        let tx = Transaction(transactionBody: body, transactionWitnessSet: witnesses)
+
+        let result = try await phaseTwo().evaluate(transaction: tx, resolvedInputs: [])
+
+        let r = try #require(result.redeemers.first)
+        #expect(!r.passed)
+        guard case .typeError(let message) = r.error else {
+            Issue.record("Expected typeError, got \(String(describing: r.error))")
+            return
+        }
+        // Unresolvable spend input is reported against the input the key names.
+        #expect(message.contains("\(in1)"))
     }
 
     // MARK: — Mixed redeemers preserve ordering
@@ -224,9 +251,18 @@ struct PhaseTwoCoverageTests {
 
     // MARK: — Convenience initializer
 
-    @Test("protocol-parameters initializer builds a usable PhaseTwo")
-    func protocolParamsInit_works() async throws {
-        let pt = try PhaseTwo(protocolParameters: dummyProtocolParametersForCoverage(), version: .v2)
+    /// Protocol parameters carrying no cost model used to be accepted
+    /// silently, handing back a placeholder whose budgets meant nothing.
+    @Test("protocol-parameters initializer rejects parameters with no cost model")
+    func protocolParamsInit_rejectsEmptyCostModel() throws {
+        #expect(throws: CostModelError.missingCostModel(.v2)) {
+            try PhaseTwo(protocolParameters: dummyProtocolParametersForCoverage(), version: .v2)
+        }
+    }
+
+    @Test("placeholder cost model builds a usable PhaseTwo")
+    func placeholderInit_works() async throws {
+        let pt = PhaseTwo(costModel: .placeholder())
         let body = TransactionBody(inputs: .list([input()]), outputs: [], fee: 0)
         let tx = Transaction(transactionBody: body, transactionWitnessSet: TransactionWitnessSet())
 

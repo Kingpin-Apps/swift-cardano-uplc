@@ -118,7 +118,7 @@ struct DeBruijnConversionTests {
                 argument: .constant(.integer(BigInt(4)))
             )
         )
-        var machine = CEKMachine(budget: .unlimited, costModel: .defaultV2())
+        var machine = CEKMachine(budget: .unlimited, costModel: .placeholder())
         let result = try machine.run(applied)
         if case .constant(.integer(let n)) = result.term {
             #expect(n == 7)
@@ -141,7 +141,7 @@ struct DeBruijnConversionTests {
             version: restored.version,
             term: .apply(function: restored.term, argument: .constant(.integer(BigInt(77))))
         )
-        var machine = CEKMachine(budget: .unlimited, costModel: .defaultV2())
+        var machine = CEKMachine(budget: .unlimited, costModel: .placeholder())
         let result = try machine.run(applied)
         if case .constant(.integer(let n)) = result.term {
             #expect(n == 77)
@@ -158,7 +158,7 @@ struct CEKMachineBasicTests {
     @Test func evalConstant() throws {
         let term = Term<NamedDeBruijn>.constant(.integer(BigInt(42)))
         let program = NamedDeBruijnProgram(version: (1, 0, 0), term: term)
-        var machine = CEKMachine(budget: .unlimited, costModel: .defaultV2())
+        var machine = CEKMachine(budget: .unlimited, costModel: .placeholder())
         let result = try machine.run(program)
         if case .constant(.integer(let n)) = result.term {
             #expect(n == 42)
@@ -173,7 +173,7 @@ struct CEKMachineBasicTests {
         let arg = Term<NamedDeBruijn>.constant(.integer(BigInt(1)))
         let applied = Term<NamedDeBruijn>.apply(function: lambda, argument: arg)
         let program = NamedDeBruijnProgram(version: (1, 0, 0), term: applied)
-        var machine = CEKMachine(budget: .unlimited, costModel: .defaultV2())
+        var machine = CEKMachine(budget: .unlimited, costModel: .placeholder())
         let result = try machine.run(program)
         if case .constant(.integer(let n)) = result.term {
             #expect(n == 1)
@@ -191,7 +191,7 @@ struct CEKMachineBasicTests {
             argument: three
         )
         let program = NamedDeBruijnProgram(version: (1, 0, 0), term: applied)
-        var machine = CEKMachine(budget: .unlimited, costModel: .defaultV2())
+        var machine = CEKMachine(budget: .unlimited, costModel: .placeholder())
         let result = try machine.run(program)
         if case .constant(.integer(let n)) = result.term {
             #expect(n == 5)
@@ -202,7 +202,7 @@ struct CEKMachineBasicTests {
 
     @Test func evalErrorTerm() {
         let program = NamedDeBruijnProgram(version: (1, 0, 0), term: .error)
-        var machine = CEKMachine(budget: .unlimited, costModel: .defaultV2())
+        var machine = CEKMachine(budget: .unlimited, costModel: .placeholder())
         #expect(throws: MachineError.evaluationFailure) {
             try machine.run(program)
         }

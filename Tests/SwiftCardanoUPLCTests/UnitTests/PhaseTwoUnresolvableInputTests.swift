@@ -13,7 +13,7 @@ struct PhaseTwoUnresolvableInputTests {
     @Test("Unresolvable spend input does not throw — returns failed result instead")
     func unresolvableSpendInput_doesNotThrow() async throws {
         let tx = makeTransaction(spendRedeemerCount: 1)
-        let result = try await PhaseTwo(protocolParameters: dummyProtocolParameters())
+        let result = try await PhaseTwo(costModel: .placeholder())
             .evaluate(transaction: tx, resolvedInputs: [])
 
         #expect(result.redeemers.count == 1)
@@ -25,7 +25,7 @@ struct PhaseTwoUnresolvableInputTests {
     @Test("Unresolvable spend input error message identifies the missing input")
     func unresolvableSpendInput_errorMessageContainsUnresolvedSpentInput() async throws {
         let tx = makeTransaction(spendRedeemerCount: 1)
-        let result = try await PhaseTwo(protocolParameters: dummyProtocolParameters())
+        let result = try await PhaseTwo(costModel: .placeholder())
             .evaluate(transaction: tx, resolvedInputs: [])
 
         let r = try #require(result.redeemers.first)
@@ -40,7 +40,7 @@ struct PhaseTwoUnresolvableInputTests {
     @Test("Unresolvable spend input is NOT reported as a script evaluation failure")
     func unresolvableSpendInput_isNotEvaluationFailure() async throws {
         let tx = makeTransaction(spendRedeemerCount: 1)
-        let result = try await PhaseTwo(protocolParameters: dummyProtocolParameters())
+        let result = try await PhaseTwo(costModel: .placeholder())
             .evaluate(transaction: tx, resolvedInputs: [])
 
         let r = try #require(result.redeemers.first)
@@ -54,7 +54,7 @@ struct PhaseTwoUnresolvableInputTests {
     @Test("Unresolvable spend input result is marked as not passed")
     func unresolvableSpendInput_resultNotPassed() async throws {
         let tx = makeTransaction(spendRedeemerCount: 1)
-        let result = try await PhaseTwo(protocolParameters: dummyProtocolParameters())
+        let result = try await PhaseTwo(costModel: .placeholder())
             .evaluate(transaction: tx, resolvedInputs: [])
 
         let r = try #require(result.redeemers.first)
@@ -64,7 +64,7 @@ struct PhaseTwoUnresolvableInputTests {
     @Test("Unresolvable spend input result carries the correct redeemer array index")
     func unresolvableSpendInput_hasCorrectIndex() async throws {
         let tx = makeTransaction(spendRedeemerCount: 1)
-        let result = try await PhaseTwo(protocolParameters: dummyProtocolParameters())
+        let result = try await PhaseTwo(costModel: .placeholder())
             .evaluate(transaction: tx, resolvedInputs: [])
 
         let r = try #require(result.redeemers.first)
@@ -74,7 +74,7 @@ struct PhaseTwoUnresolvableInputTests {
     @Test("PhaseTwoResult.success is false when any spend input is unresolvable")
     func phaseTwoResult_successIsFalse_whenInputUnresolvable() async throws {
         let tx = makeTransaction(spendRedeemerCount: 1)
-        let result = try await PhaseTwo(protocolParameters: dummyProtocolParameters())
+        let result = try await PhaseTwo(costModel: .placeholder())
             .evaluate(transaction: tx, resolvedInputs: [])
 
         #expect(!result.success)
@@ -85,7 +85,7 @@ struct PhaseTwoUnresolvableInputTests {
     @Test("All unresolvable spend redeemers each get their own failed result")
     func multipleUnresolvableInputs_allGetFailedResults() async throws {
         let tx = makeTransaction(spendRedeemerCount: 3)
-        let result = try await PhaseTwo(protocolParameters: dummyProtocolParameters())
+        let result = try await PhaseTwo(costModel: .placeholder())
             .evaluate(transaction: tx, resolvedInputs: [])
 
         #expect(result.redeemers.count == 3)
@@ -109,7 +109,7 @@ struct PhaseTwoUnresolvableInputTests {
     @Test("Results are returned in ascending index order even with multiple unresolvable inputs")
     func unresolvableInputs_resultsAreSortedByIndex() async throws {
         let tx = makeTransaction(spendRedeemerCount: 2)
-        let result = try await PhaseTwo(protocolParameters: dummyProtocolParameters())
+        let result = try await PhaseTwo(costModel: .placeholder())
             .evaluate(transaction: tx, resolvedInputs: [])
 
         #expect(result.redeemers.map(\.index) == [0, 1])

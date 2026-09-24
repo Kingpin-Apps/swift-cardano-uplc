@@ -16,6 +16,28 @@ public struct RedeemerResult: Sendable {
     public let remainingBudget: ExBudget
     public let logs: [String]
     public let error: MachineError?
+    /// Whether `remainingBudget` reflects a real cost model.
+    ///
+    /// False when evaluation used the placeholder cost model, in which case
+    /// the budget is not meaningful and must not be reported as execution
+    /// units or compared against the transaction's declared units.
+    public let budgetMeasured: Bool
+
+    public init(
+        index: Int,
+        passed: Bool,
+        remainingBudget: ExBudget,
+        logs: [String],
+        error: MachineError?,
+        budgetMeasured: Bool = false
+    ) {
+        self.index = index
+        self.passed = passed
+        self.remainingBudget = remainingBudget
+        self.logs = logs
+        self.error = error
+        self.budgetMeasured = budgetMeasured
+    }
 }
 
 /// Evaluates all Plutus scripts in a transaction (Phase 2 validation).
@@ -23,16 +45,44 @@ public struct RedeemerResult: Sendable {
 /// Scripts run in parallel via Swift structured concurrency.
 /// Each redeemer gets its own independent `CEKMachine` instance.
 public struct PhaseTwo: @unchecked Sendable {
-    private let costModel: CostModel
+    private let costModels: [PlutusVersion: CostModel]
 
-    /// Primary initializer — caller supplies a fully built cost model.
+    /// Primary initializer — caller supplies a cost model used for every
+    /// language version.
     public init(costModel: CostModel) {
-        self.costModel = costModel
+        self.costModels = [.v1: costModel, .v2: costModel, .v3: costModel]
     }
 
-    /// Convenience — derive the cost model from protocol parameters.
-    public init(protocolParameters: ProtocolParameters, version: PlutusVersion = .v2) throws {
-        self.costModel = try CostModel.fromProtocolParams(protocolParameters, version: version)
+    /// Derive cost models from protocol parameters.
+    ///
+    /// A cost model is per language version, and a transaction can execute
+    /// scripts of more than one. Each script is costed with the model for its
+    /// own version — costing a PlutusV3 script with the V2 model prices four
+    /// builtins by the wrong formula and misreports every budget.
+    ///
+    /// - Parameter version: when given, only that version's model is built and
+    ///   it is used for every script. Prefer omitting it.
+    public init(protocolParameters: ProtocolParameters, version: PlutusVersion? = nil) throws {
+        if let version {
+            let model = try CostModel.fromProtocolParams(protocolParameters, version: version)
+            self.costModels = [.v1: model, .v2: model, .v3: model]
+            return
+        }
+        var models: [PlutusVersion: CostModel] = [:]
+        var lastError: Error?
+        for candidate in [PlutusVersion.v1, .v2, .v3] {
+            do {
+                models[candidate] = try CostModel.fromProtocolParams(
+                    protocolParameters, version: candidate
+                )
+            } catch {
+                lastError = error
+            }
+        }
+        guard !models.isEmpty else {
+            throw lastError ?? CostModelError.missingCostModel(.v3)
+        }
+        self.costModels = models
     }
 
     /// Evaluate all Plutus scripts in a transaction.
@@ -45,15 +95,22 @@ public struct PhaseTwo: @unchecked Sendable {
         transaction: Transaction,
         resolvedInputs: [UTxO]
     ) async throws -> PhaseTwoResult {
-        let costModel = self.costModel
+        let costModels = self.costModels
         let redeemers: [Redeemer]
         if let rs = transaction.transactionWitnessSet.redeemers {
             switch rs {
             case .list(let list):
                 redeemers = list.compactMap { $0 as? Redeemer }
             case .map(let map):
-                redeemers = map.dictionary.values.compactMap { v in
-                    Redeemer(tag: nil, index: 0, data: v.data, exUnits: v.exUnits)
+                // The tag and index live in the RedeemerKey — dropping them
+                // leaves findScript with nothing to look the script up by.
+                redeemers = map.dictionary.map { key, value in
+                    Redeemer(
+                        tag: key.tag,
+                        index: key.index,
+                        data: value.data,
+                        exUnits: value.exUnits
+                    )
                 }
             }
         } else {
@@ -93,7 +150,7 @@ public struct PhaseTwo: @unchecked Sendable {
                         index: index,
                         transaction: transaction,
                         resolvedInputs: resolvedInputs,
-                        costModel: costModel
+                        costModels: costModels
                     )
                 }
             }
@@ -132,7 +189,7 @@ private func evaluateSingleScript(
     index: Int,
     transaction: Transaction,
     resolvedInputs: [UTxO],
-    costModel: CostModel
+    costModels: [PlutusVersion: CostModel]
 ) async -> RedeemerResult {
     do {
         let (scriptData, version) = try findScript(
@@ -148,19 +205,38 @@ private func evaluateSingleScript(
             program: program, redeemer: redeemer, scriptContext: scriptContext,
             transaction: transaction, resolvedInputs: resolvedInputs, version: version
         )
-        var machine = CEKMachine(budget: .restricted, costModel: costModel)
+        // An approximate cost model cannot decide budget exhaustion — it
+        // reports correct scripts as out of budget. Evaluate unmetered so the
+        // outcome reflects the script's logic, and say so via
+        // `budgetMeasured`.
+        // Cost the script with the model for its own language version.
+        guard let costModel = costModels[version] else {
+            throw MachineError.typeError(
+                "no cost model available for \(version); the chain's protocol parameters "
+                + "carry none for that Plutus version."
+            )
+        }
+        let budget: ExBudget = costModel.isApproximate ? .unlimited : .restricted
+        var machine = CEKMachine(budget: budget, costModel: costModel)
         let result = try machine.run(applied)
         return RedeemerResult(index: index, passed: true,
                               remainingBudget: result.remainingBudget,
-                              logs: result.logs, error: nil)
+                              logs: result.logs, error: nil,
+                              budgetMeasured: !costModel.isApproximate)
     } catch let err as MachineError {
         return RedeemerResult(index: index, passed: false,
                               remainingBudget: .restricted,
                               logs: [], error: err)
     } catch {
+        // Anything thrown outside the machine — flat decoding, script lookup,
+        // script-context construction — is not an `error` term being
+        // evaluated. Reporting it as `.evaluationFailure` hides the real
+        // cause behind "the script said no", which is the one thing it does
+        // not mean.
         return RedeemerResult(index: index, passed: false,
                               remainingBudget: .restricted,
-                              logs: [], error: .evaluationFailure)
+                              logs: [],
+                              error: .typeError("script could not be prepared for evaluation: \(error)"))
     }
 }
 
@@ -315,9 +391,24 @@ private func buildScriptContext(
         guard redeemer.index < sortedInputs.count else {
             throw MachineError.typeError("buildScriptContext: spend index out of range")
         }
+        let spentInput = sortedInputs[redeemer.index]
+        if version == .v3 {
+            // V3 carries the datum inside the context's ScriptInfo rather than
+            // passing it as a separate argument.
+            let datum = try? findDatum(
+                for: redeemer, transaction: transaction, resolvedInputs: resolvedInputs
+            )
+            return try builder.spendingContextV3(
+                transaction: transaction,
+                spentInput: spentInput,
+                resolvedInputs: resolvedInputs,
+                redeemer: redeemer.data,
+                datum: datum
+            )
+        }
         return try builder.spendingContext(
             transaction: transaction,
-            spentInput: sortedInputs[redeemer.index],
+            spentInput: spentInput,
             resolvedInputs: resolvedInputs,
             version: version
         )
@@ -332,10 +423,19 @@ private func buildScriptContext(
         guard redeemer.index < sortedPolicies.count else {
             throw MachineError.typeError("buildScriptContext: mint index out of range")
         }
+        let policyId = sortedPolicies[redeemer.index].payload
+        if version == .v3 {
+            return try builder.mintingContextV3(
+                transaction: transaction,
+                resolvedInputs: resolvedInputs,
+                policyId: policyId,
+                redeemer: redeemer.data
+            )
+        }
         return try builder.mintingContext(
             transaction: transaction,
             resolvedInputs: resolvedInputs,
-            policyId: sortedPolicies[redeemer.index].payload,
+            policyId: policyId,
             version: version
         )
 
@@ -356,8 +456,19 @@ private func applyArguments(
 ) throws -> NamedDeBruijnProgram {
     var term = program.term
 
+    // A V3 script takes exactly one argument: the ScriptContext. Both the
+    // redeemer and (for spending scripts) the datum live inside it. Passing
+    // them separately, as V1/V2 require, over-applies the script.
+    if version == .v3 {
+        let ctxTerm = Term<NamedDeBruijn>.constant(.data(scriptContext))
+        return NamedDeBruijnProgram(
+            version: program.version,
+            term: .apply(function: term, argument: ctxTerm)
+        )
+    }
+
     // For V1/V2 spending scripts, prepend datum as the first argument
-    if redeemer.tag == .spend && version != .v3 {
+    if redeemer.tag == .spend {
         let datum = try findDatum(
             for: redeemer, transaction: transaction, resolvedInputs: resolvedInputs
         )
