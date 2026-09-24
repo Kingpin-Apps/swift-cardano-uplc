@@ -173,6 +173,7 @@ public struct CEKMachine: Sendable {
             }
             args.append(argument)
             if args.count == fn.arity {
+                try spendBuiltinBudget(fn, arguments: args)
                 let result = try BuiltinRuntime.apply(fn, to: args, costModel: costModel, logs: &logs)
                 return .returning(ctx, result)
             } else {
@@ -195,6 +196,7 @@ public struct CEKMachine: Sendable {
             }
             forces += 1
             if forces == fn.forceCount && args.count == fn.arity {
+                try spendBuiltinBudget(fn, arguments: args)
                 let result = try BuiltinRuntime.apply(fn, to: args, costModel: costModel, logs: &logs)
                 return .returning(ctx, result)
             }
@@ -222,6 +224,24 @@ public struct CEKMachine: Sendable {
                                      mem: stepCost.mem * Int64(count)))
         }
         unbudgetedSteps.removeAll()
+    }
+
+    /// Charge a builtin's cost, which depends on the sizes of its arguments.
+    ///
+    /// Any budget batched up from machine steps is settled first: a builtin
+    /// must not be charged before the steps that led to it, or a script can
+    /// overshoot the budget by up to one batch.
+    private mutating func spendBuiltinBudget(
+        _ function: DefaultFunction, arguments: [Value]
+    ) throws {
+        try spendUnbudgetedSteps()
+        guard let cost = costModel.budget(for: function, arguments: arguments) else {
+            throw MachineError.typeError(
+                "builtin \(function) is not priced by this cost model, so the script's "
+                + "Plutus version cannot use it."
+            )
+        }
+        try spendBudget(cost)
     }
 
     private mutating func spendBudget(_ cost: ExBudget) throws {

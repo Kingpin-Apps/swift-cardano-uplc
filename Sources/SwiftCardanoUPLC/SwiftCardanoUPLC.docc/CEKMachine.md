@@ -20,7 +20,7 @@ Every step deducts from an ``ExBudget``. Use `.unlimited` for tests and offline 
 
 ```swift
 // Offline / testing
-var machine = CEKMachine(budget: .unlimited, costModel: .defaultV2())
+var machine = CEKMachine(budget: .unlimited, costModel: .placeholder())
 
 // On-chain simulation
 let costModel = try CostModel.fromProtocolParams(try await context.protocolParameters())
@@ -35,7 +35,7 @@ var parser = UPLCParser()
 let named  = try parser.parse(source)
 let ndb    = try DeBruijnConverter().convertToNamed(DeBruijnConverter().convert(named))
 
-var machine = CEKMachine(budget: .unlimited, costModel: .defaultV2())
+var machine = CEKMachine(budget: .unlimited, costModel: .placeholder())
 let result  = try machine.run(ndb)
 // result.term == .constant(.integer(7))
 ```

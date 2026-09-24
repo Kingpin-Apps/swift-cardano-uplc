@@ -60,81 +60,186 @@ public struct MachineStepCosts: Sendable {
     }
 }
 
-// MARK: — Builtin cost model (simplified — linear model)
-
-/// Cost for a single builtin invocation, expressed as a linear function of input sizes.
-/// `cost = intercept + slope * size`
-public struct LinearCost: Sendable {
-    public var intercept: Int64
-    public var slope: Int64
-    public init(intercept: Int64, slope: Int64 = 0) {
-        self.intercept = intercept
-        self.slope = slope
-    }
-    public func evaluate(size: Int64) -> ExBudget {
-        ExBudget(cpu: intercept + slope * size, mem: 1)
-    }
-}
-
-/// Per-builtin cost entry (CPU + memory, each a linear function of argument size).
-public struct BuiltinCost: Sendable {
-    public var cpu: LinearCost
-    public var mem: LinearCost
-    public init(cpu: LinearCost, mem: LinearCost) {
-        self.cpu = cpu
-        self.mem = mem
-    }
-    /// Flat cost regardless of arguments.
-    public static func flat(cpu: Int64, mem: Int64) -> BuiltinCost {
-        BuiltinCost(cpu: LinearCost(intercept: cpu), mem: LinearCost(intercept: mem))
-    }
-}
-
 // MARK: — CostModel
 
 /// The complete cost model for CEK machine evaluation.
 public struct CostModel: Sendable {
     public let machineStepCosts: MachineStepCosts
-    public let builtinCosts: [DefaultFunction: BuiltinCost]
+    public let builtinCosts: [DefaultFunction: BuiltinCostingFunction]
 
-    public init(machineStepCosts: MachineStepCosts, builtinCosts: [DefaultFunction: BuiltinCost]) {
+    /// Whether these costs are placeholders rather than the chain's real
+    /// cost model. Budgets from an approximate model are meaningless, so
+    /// callers must not use budget exhaustion to decide whether a script
+    /// passed.
+    public let isApproximate: Bool
+
+    public init(
+        machineStepCosts: MachineStepCosts,
+        builtinCosts: [DefaultFunction: BuiltinCostingFunction],
+        isApproximate: Bool = false
+    ) {
         self.machineStepCosts = machineStepCosts
         self.builtinCosts = builtinCosts
+        self.isApproximate = isApproximate
     }
 
-    /// Approximate V2 PlutusV2 default cost model.
-    /// For production use, load from a live chain context instead.
-    public static func defaultV2() -> CostModel {
+    /// The budget a builtin consumes for the given arguments, or `nil` when
+    /// this cost model does not price it.
+    ///
+    /// An unpriced builtin is one the chain's cost model has no parameters
+    /// for, which means the language version predates it and a script cannot
+    /// legitimately call it. Costing it at zero would let such a script run
+    /// for free, so callers must treat `nil` as an error.
+    public func budget(for function: DefaultFunction, arguments: [Value]) -> ExBudget? {
+        guard let costing = builtinCosts[function] else { return nil }
+        return costing.budget(sizes: ExMemory.sizes(for: function, arguments: arguments))
+    }
+
+    /// A placeholder model, for evaluating a script when no protocol
+    /// parameters are available. **Not** the chain's cost model — see
+    /// ``isApproximate``.
+    public static func placeholder() -> CostModel {
         let step = ExBudget(cpu: 16_000, mem: 100)
         let stepCosts = MachineStepCosts(
             startup:  ExBudget(cpu: 100, mem: 100),
-            variable: step,
-            constant: step,
-            lambda:   step,
-            delay:    step,
-            force:    step,
-            apply:    step,
-            constr:   ExBudget(cpu: 30_000_000_000, mem: 100), // placeholder pre-Conway
-            kase:     ExBudget(cpu: 30_000_000_000, mem: 100),
-            builtin:  step
+            variable: step, constant: step, lambda: step, delay: step,
+            force: step, apply: step, constr: step, kase: step, builtin: step
         )
-        // Use a flat cost for all builtins as a placeholder.
-        // Production usage should load from protocol parameters.
-        var builtinCosts = [DefaultFunction: BuiltinCost]()
+        var builtinCosts = [DefaultFunction: BuiltinCostingFunction]()
         for fn in DefaultFunction.allCases {
-            builtinCosts[fn] = BuiltinCost.flat(cpu: 1_000_000, mem: 1_000)
+            builtinCosts[fn] = BuiltinCostingFunction(
+                cpu: .constant(1_000_000), memory: .constant(1_000)
+            )
         }
-        return CostModel(machineStepCosts: stepCosts, builtinCosts: builtinCosts)
+        return CostModel(
+            machineStepCosts: stepCosts, builtinCosts: builtinCosts, isApproximate: true
+        )
     }
 
-    /// Load cost model from a static `ProtocolParameters` value.
-    public static func fromProtocolParams(_ params: ProtocolParameters, version: PlutusVersion = .v2) throws -> CostModel {
-        // The flat cost array is alphabetically ordered by parameter name in Cardano protocol params.
-        // For now we use the default model — a full implementation maps the [Int] array
-        // to named fields using the Plutus cost model specification.
-        return .defaultV2()
+    @available(*, deprecated, renamed: "placeholder")
+    public static func defaultV2() -> CostModel { placeholder() }
+
+    /// Build the cost model the chain is currently using.
+    ///
+    /// Protocol parameters carry each language's cost model as a bare array of
+    /// integers; the ledger tags them by position using a fixed parameter
+    /// order (see ``CostModelParameterNames``). The *shapes* of the costing
+    /// functions come from the Plutus release and are fixed per language
+    /// version; only the coefficients come from the chain.
+    ///
+    /// - Throws: ``CostModelError`` when the chain supplies no cost model for
+    ///   the requested version, or one too short to name every parameter the
+    ///   costing functions need.
+    public static func fromProtocolParams(
+        _ params: ProtocolParameters,
+        version: PlutusVersion = .v2
+    ) throws -> CostModel {
+        let languageId: Int
+        let names: [String]
+        switch version {
+        case .v1: languageId = 1; names = CostModelParameterNames.plutusv1
+        case .v2: languageId = 2; names = CostModelParameterNames.plutusv2
+        case .v3: languageId = 3; names = CostModelParameterNames.plutusv3
+        }
+
+        guard let values = params.costModels.getVersion(languageId), !values.isEmpty else {
+            throw CostModelError.missingCostModel(version)
+        }
+
+        // A shorter array is an older chain that predates the newest
+        // parameters; a longer one is a newer chain whose extra parameters
+        // this build has no names for. Either way, pair up what we can.
+        var table = [String: Int64](minimumCapacity: values.count)
+        for (name, value) in zip(names, values) { table[name] = value }
+
+        return try fromParameters(table, version: version, supplied: values.count)
     }
 
+    /// Build a cost model from cost-model parameters keyed by name.
+    ///
+    /// This is the form the Plutus cost-model data files use; protocol
+    /// parameters are the same values positionally.
+    public static func fromParameters(
+        _ table: [String: Int64],
+        version: PlutusVersion,
+        supplied: Int? = nil
+    ) throws -> CostModel {
+        var missing: [String] = []
+        let lookup: (String) -> Int64 = { name in
+            guard let value = table[name] else {
+                missing.append(name)
+                return 0
+            }
+            return value
+        }
+
+        let stepCosts = MachineStepCosts(
+            startup:  ExBudget(cpu: lookup("cekStartupCost-exBudgetCPU"),
+                               mem: lookup("cekStartupCost-exBudgetMemory")),
+            variable: ExBudget(cpu: lookup("cekVarCost-exBudgetCPU"),
+                               mem: lookup("cekVarCost-exBudgetMemory")),
+            constant: ExBudget(cpu: lookup("cekConstCost-exBudgetCPU"),
+                               mem: lookup("cekConstCost-exBudgetMemory")),
+            lambda:   ExBudget(cpu: lookup("cekLamCost-exBudgetCPU"),
+                               mem: lookup("cekLamCost-exBudgetMemory")),
+            delay:    ExBudget(cpu: lookup("cekDelayCost-exBudgetCPU"),
+                               mem: lookup("cekDelayCost-exBudgetMemory")),
+            force:    ExBudget(cpu: lookup("cekForceCost-exBudgetCPU"),
+                               mem: lookup("cekForceCost-exBudgetMemory")),
+            apply:    ExBudget(cpu: lookup("cekApplyCost-exBudgetCPU"),
+                               mem: lookup("cekApplyCost-exBudgetMemory")),
+            // Constr and case arrived with Plutus Core 1.1.0, so a PlutusV1 or
+            // V2 cost model does not price them. Those languages cannot
+            // contain the terms either, so the cost is never charged.
+            constr:   version == .v3
+                ? ExBudget(cpu: lookup("cekConstrCost-exBudgetCPU"),
+                           mem: lookup("cekConstrCost-exBudgetMemory"))
+                : ExBudget(cpu: 0, mem: 0),
+            kase:     version == .v3
+                ? ExBudget(cpu: lookup("cekCaseCost-exBudgetCPU"),
+                           mem: lookup("cekCaseCost-exBudgetMemory"))
+                : ExBudget(cpu: 0, mem: 0),
+            builtin:  ExBudget(cpu: lookup("cekBuiltinCost-exBudgetCPU"),
+                               mem: lookup("cekBuiltinCost-exBudgetMemory"))
+        )
+
+        // The machine step costs are not optional: without them nothing can
+        // be costed at all.
+        guard missing.isEmpty else {
+            throw CostModelError.incompleteCostModel(
+                version: version, supplied: supplied ?? table.count, missing: missing.sorted()
+            )
+        }
+
+        missing.removeAll()
+        var builtinCosts = version == .v3
+            ? builtinCostsVariantC(lookup)
+            : builtinCostsVariantA(lookup)
+
+        // A cost model from an older chain does not name the parameters of
+        // builtins that did not exist yet. Those builtins are simply not
+        // available in that protocol version, so drop them rather than
+        // rejecting the whole model — a script cannot call them, and if one
+        // somehow does the evaluator reports it instead of silently costing
+        // it at zero.
+        if !missing.isEmpty {
+            let unpriced = Set(missing.map { String($0.prefix(while: { $0 != "-" })) })
+            builtinCosts = builtinCosts.filter { !unpriced.contains("\($0.key)") }
+        }
+
+        return CostModel(
+            machineStepCosts: stepCosts, builtinCosts: builtinCosts, isApproximate: false
+        )
+    }
+}
+
+/// Raised when a usable cost model cannot be built from protocol parameters.
+public enum CostModelError: Error, Sendable, Equatable {
+    /// The protocol parameters carry no cost model for this language version.
+    case missingCostModel(PlutusVersion)
+    /// The supplied cost model does not name every parameter the costing
+    /// functions need — an older chain, or a newer one this build predates.
+    case incompleteCostModel(version: PlutusVersion, supplied: Int, missing: [String])
 }
 
 /// Plutus script language version.

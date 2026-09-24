@@ -7,7 +7,7 @@ A Swift runtime for Cardano's Untyped Plutus Core (UPLC).
 `SwiftCardanoUPLC` provides a complete UPLC toolchain for the Cardano blockchain:
 
 - **Parse** UPLC textual programs into an AST
-- **Evaluate** programs using the CEK machine with a configurable cost model
+- **Evaluate** programs using the CEK machine with the chain's real cost model
 - **Encode / decode** programs in the on-chain flat binary format
 - **Validate** Plutus scripts inside Cardano transactions (Phase-2 validation)
 
@@ -41,7 +41,7 @@ let db   = try DeBruijnConverter().convert(named)
 let ndb  = try DeBruijnConverter().convertToNamed(db)
 
 // 3. Evaluate
-var machine = CEKMachine(budget: .unlimited, costModel: .defaultV2())
+var machine = CEKMachine(budget: .unlimited, costModel: .placeholder())
 let result  = try machine.run(ndb)
 // result.term == .constant(.integer(42))
 ```
