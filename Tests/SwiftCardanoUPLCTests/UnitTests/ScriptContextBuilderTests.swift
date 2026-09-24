@@ -128,7 +128,7 @@ struct ScriptContextBuilderTests {
         let tx = Transaction(transactionBody: body, transactionWitnessSet: TransactionWitnessSet())
 
         let ctx = try ScriptContextBuilder().mintingContext(
-            transaction: tx, resolvedInputs: [], policyId: policyId, version: .v2
+            transaction: tx, resolvedInputs: [try scriptUTxO()], policyId: policyId, version: .v2
         )
 
         let purpose = try #require(ctx.constrFields?[1])
@@ -138,7 +138,7 @@ struct ScriptContextBuilderTests {
 
     // MARK: — TxInfo field counts per version
 
-    @Test("V1 TxInfo has 10 fields, V2 and V3 have 12")
+    @Test("V1 TxInfo has 10 fields, V2 has 12")
     func txInfo_fieldCountsByVersion() throws {
         let input = txInput()
         let utxo = try scriptUTxO()
@@ -148,11 +148,27 @@ struct ScriptContextBuilderTests {
 
         let v1 = try builder.spendingContext(transaction: tx, spentInput: input, resolvedInputs: [utxo], version: .v1)
         let v2 = try builder.spendingContext(transaction: tx, spentInput: input, resolvedInputs: [utxo], version: .v2)
-        let v3 = try builder.spendingContext(transaction: tx, spentInput: input, resolvedInputs: [utxo], version: .v3)
 
         #expect(v1.constrFields?[0].constrFields?.count == 10)
         #expect(v2.constrFields?[0].constrFields?.count == 12)
-        #expect(v3.constrFields?[0].constrFields?.count == 12)
+    }
+
+    /// V3's ScriptContext is structurally different from V1/V2, so the V1/V2
+    /// entry point must refuse it rather than emitting the V2 shape — which
+    /// produced a context every V3 validator rejects, reading as "your script
+    /// failed". V3 has its own entry points.
+    @Test("the V1/V2 entry point refuses V3 instead of emitting the V2 shape")
+    func txInfo_v3IsExplicitlyUnsupported() throws {
+        let input = txInput()
+        let utxo = try scriptUTxO()
+        let body = TransactionBody(inputs: .list([input]), outputs: [], fee: 0)
+        let tx = Transaction(transactionBody: body, transactionWitnessSet: TransactionWitnessSet())
+
+        #expect(throws: ScriptContextError.self) {
+            try ScriptContextBuilder().spendingContext(
+                transaction: tx, spentInput: input, resolvedInputs: [utxo], version: .v3
+            )
+        }
     }
 
     // MARK: — Inputs list
@@ -174,18 +190,21 @@ struct ScriptContextBuilderTests {
         #expect(inputs[0].constrFields?.count == 2)
     }
 
-    @Test("unresolved inputs are dropped from the TxInfo inputs list")
-    func txInfo_unresolvedInputDropped() throws {
+    /// An unresolved input used to be silently omitted, handing the script a
+    /// transaction that spends less than the real one — a script checking
+    /// "how much came in" would read the wrong total and still be told it had
+    /// the real context.
+    @Test("an unresolved input is refused rather than dropped")
+    func txInfo_unresolvedInputRefused() throws {
         let input = txInput()
         let body = TransactionBody(inputs: .list([input]), outputs: [], fee: 0)
         let tx = Transaction(transactionBody: body, transactionWitnessSet: TransactionWitnessSet())
 
-        // No resolved inputs at all.
-        let ctx = try ScriptContextBuilder().spendingContext(
-            transaction: tx, spentInput: input, resolvedInputs: [], version: .v2
-        )
-        let inputs = try #require(ctx.constrFields?[0].constrFields?[0].arrayItems)
-        #expect(inputs.isEmpty)
+        #expect(throws: ScriptContextError.self) {
+            try ScriptContextBuilder().spendingContext(
+                transaction: tx, spentInput: input, resolvedInputs: [], version: .v2
+            )
+        }
     }
 
     // MARK: — Fee encoding
@@ -493,5 +512,225 @@ struct ScriptContextBuilderTests {
         )
         let datums = try #require(ctx.constrFields?[0].constrFields?[10].mapEntries)
         #expect(datums.isEmpty)
+    }
+}
+
+
+// MARK: — PlutusV3 script context
+
+/// PlutusV3's context is a different structure from V1/V2, and the differences
+/// are all silent ones — a wrong shape does not fail to build, it just makes
+/// every validator reject the transaction.
+@Suite("PlutusV3 ScriptContext")
+struct ScriptContextV3Tests {
+
+    private func redeemerData() -> PlutusData { .bigInt(.int(42)) }
+
+    private func fixture(
+        referenceInputs: ListOrNonEmptyOrderedSet<TransactionInput>? = nil,
+        certificates: ListOrNonEmptyOrderedSet<Certificate>? = nil,
+        ttl: SlotNumber? = nil
+    ) throws -> (tx: Transaction, spent: TransactionInput, utxos: [UTxO]) {
+        let spent = txInput(0x01)
+        let utxo = try scriptUTxO(0x01)
+        var body = TransactionBody(
+            inputs: .list([spent]),
+            outputs: [TransactionOutput(address: try vkeyAddress(), amount: Value(coin: 1_000_000))],
+            fee: 175_000
+        )
+        body.referenceInputs = referenceInputs
+        body.certificates = certificates
+        body.ttl = ttl
+
+        var redeemerMap = RedeemerMap()
+        redeemerMap[RedeemerKey(tag: .spend, index: 0)] = RedeemerValue(
+            data: redeemerData(), exUnits: ExecutionUnits(mem: 1, steps: 1)
+        )
+        let tx = Transaction(
+            transactionBody: body,
+            transactionWitnessSet: TransactionWitnessSet(redeemers: .map(redeemerMap))
+        )
+        return (tx, spent, [utxo])
+    }
+
+    @Test("ScriptContext is Constr 0 with TxInfo, redeemer and ScriptInfo")
+    func contextHasThreeFields() throws {
+        let f = try fixture()
+        let ctx = try ScriptContextBuilder().spendingContextV3(
+            transaction: f.tx, spentInput: f.spent, resolvedInputs: f.utxos,
+            redeemer: redeemerData(), datum: nil
+        )
+        #expect(ctx.constrTag == 0)
+        #expect(ctx.constrFields?.count == 3)
+        #expect(ctx.constrFields?[1].intValue == 42)  // the redeemer itself
+    }
+
+    @Test("TxInfo has 16 fields")
+    func txInfoHasSixteenFields() throws {
+        let f = try fixture()
+        let ctx = try ScriptContextBuilder().spendingContextV3(
+            transaction: f.tx, spentInput: f.spent, resolvedInputs: f.utxos,
+            redeemer: redeemerData(), datum: nil
+        )
+        #expect(ctx.constrFields?[0].constrFields?.count == 16)
+    }
+
+    @Test("fee is a bare integer, not a Value map")
+    func feeIsInteger() throws {
+        let f = try fixture()
+        let ctx = try ScriptContextBuilder().spendingContextV3(
+            transaction: f.tx, spentInput: f.spent, resolvedInputs: f.utxos,
+            redeemer: redeemerData(), datum: nil
+        )
+        let fee = try #require(ctx.constrFields?[0].constrFields?[3])
+        #expect(fee.intValue == 175_000)
+        #expect(fee.mapEntries == nil)
+    }
+
+    @Test("transaction id is raw bytes, not Constr 0 [bytes]")
+    func txIdIsRawBytes() throws {
+        let f = try fixture()
+        let ctx = try ScriptContextBuilder().spendingContextV3(
+            transaction: f.tx, spentInput: f.spent, resolvedInputs: f.utxos,
+            redeemer: redeemerData(), datum: nil
+        )
+        let id = try #require(ctx.constrFields?[0].constrFields?[11])
+        #expect(id.bytesData != nil)
+        #expect(id.constrTag == nil)
+    }
+
+    @Test("an OutputReference's transaction id is raw bytes too")
+    func outputReferenceUsesRawBytes() throws {
+        let f = try fixture()
+        let ctx = try ScriptContextBuilder().spendingContextV3(
+            transaction: f.tx, spentInput: f.spent, resolvedInputs: f.utxos,
+            redeemer: redeemerData(), datum: nil
+        )
+        let firstInput = try #require(ctx.constrFields?[0].constrFields?[0].arrayItems?.first)
+        let outRef = try #require(firstInput.constrFields?[0])
+        #expect(outRef.constrFields?[0].bytesData == Data(repeating: 0x01, count: TRANSACTION_HASH_SIZE))
+        #expect(outRef.constrFields?[0].constrTag == nil)
+        #expect(outRef.constrFields?[1].intValue == 0)
+    }
+
+    @Test("spending ScriptInfo is Constr 1 carrying the output reference and datum")
+    func spendingScriptInfoCarriesDatum() throws {
+        let f = try fixture()
+        let datum = PlutusData.bigInt(.int(7))
+        let ctx = try ScriptContextBuilder().spendingContextV3(
+            transaction: f.tx, spentInput: f.spent, resolvedInputs: f.utxos,
+            redeemer: redeemerData(), datum: datum
+        )
+        let info = try #require(ctx.constrFields?[2])
+        #expect(info.constrTag == 1)
+        #expect(info.constrFields?.count == 2)
+        // Some(datum)
+        #expect(info.constrFields?[1].constrTag == 0)
+        #expect(info.constrFields?[1].constrFields?.first?.intValue == 7)
+    }
+
+    @Test("a missing datum is None, not an empty Some")
+    func missingDatumIsNone() throws {
+        let f = try fixture()
+        let ctx = try ScriptContextBuilder().spendingContextV3(
+            transaction: f.tx, spentInput: f.spent, resolvedInputs: f.utxos,
+            redeemer: redeemerData(), datum: nil
+        )
+        #expect(ctx.constrFields?[2].constrFields?[1].constrTag == 1)
+    }
+
+    @Test("minting ScriptInfo is Constr 0 wrapping the policy id")
+    func mintingScriptInfo() throws {
+        let f = try fixture()
+        let policyId = Data(repeating: 0xCC, count: SCRIPT_HASH_SIZE)
+        let ctx = try ScriptContextBuilder().mintingContextV3(
+            transaction: f.tx, resolvedInputs: f.utxos,
+            policyId: policyId, redeemer: redeemerData()
+        )
+        let info = try #require(ctx.constrFields?[2])
+        #expect(info.constrTag == 0)
+        #expect(info.constrFields?.first?.bytesData == policyId)
+    }
+
+    @Test("reference inputs are resolved into the context, not left empty")
+    func referenceInputsArePopulated() throws {
+        let reference = txInput(0x02)
+        let referenceUTxO = try scriptUTxO(0x02, addrByte: 0xCD)
+        var f = try fixture(referenceInputs: .list([reference]))
+        f.utxos.append(referenceUTxO)
+
+        let ctx = try ScriptContextBuilder().spendingContextV3(
+            transaction: f.tx, spentInput: f.spent, resolvedInputs: f.utxos,
+            redeemer: redeemerData(), datum: nil
+        )
+        let refs = try #require(ctx.constrFields?[0].constrFields?[1].arrayItems)
+        #expect(refs.count == 1)
+        #expect(refs[0].constrFields?[0].constrFields?[0].bytesData
+                == Data(repeating: 0x02, count: TRANSACTION_HASH_SIZE))
+    }
+
+    @Test("the redeemers map is keyed by ScriptPurpose")
+    func redeemersMapIsKeyedByPurpose() throws {
+        let f = try fixture()
+        let ctx = try ScriptContextBuilder().spendingContextV3(
+            transaction: f.tx, spentInput: f.spent, resolvedInputs: f.utxos,
+            redeemer: redeemerData(), datum: nil
+        )
+        let redeemers = try #require(ctx.constrFields?[0].constrFields?[9].mapEntries)
+        #expect(redeemers.count == 1)
+        let purpose = try #require(redeemers.keys.first)
+        #expect(purpose.constrTag == 1)  // Spend
+        #expect(redeemers.values.first?.intValue == 42)
+    }
+
+    // MARK: - Refusals
+
+    @Test("a transaction with a validity interval is refused, not given an unbounded range")
+    func validityIntervalIsRefused() throws {
+        let f = try fixture(ttl: 1_000)
+        #expect(throws: ScriptContextError.self) {
+            try ScriptContextBuilder().spendingContextV3(
+                transaction: f.tx, spentInput: f.spent, resolvedInputs: f.utxos,
+                redeemer: redeemerData(), datum: nil
+            )
+        }
+    }
+
+    @Test("an unresolved input is refused rather than dropped from the context")
+    func unresolvedInputIsRefused() throws {
+        let f = try fixture()
+        #expect(throws: ScriptContextError.self) {
+            try ScriptContextBuilder().spendingContextV3(
+                transaction: f.tx, spentInput: f.spent, resolvedInputs: [],
+                redeemer: redeemerData(), datum: nil
+            )
+        }
+    }
+}
+
+// MARK: — Interval encoding
+
+@Suite("Validity range encoding")
+struct ValidityRangeTests {
+
+    /// Both interval bounds are single-constructor records, so both are
+    /// `Constr 0`. The upper bound was emitted as `Constr 1`, which made every
+    /// validity-range check in a script read a malformed interval.
+    @Test("both interval bounds are Constr 0")
+    func bothBoundsAreConstrZero() throws {
+        let spent = txInput()
+        let utxo = try scriptUTxO()
+        let body = TransactionBody(inputs: .list([spent]), outputs: [], fee: 0)
+        let tx = Transaction(transactionBody: body, transactionWitnessSet: TransactionWitnessSet())
+
+        let ctx = try ScriptContextBuilder().spendingContext(
+            transaction: tx, spentInput: spent, resolvedInputs: [utxo], version: .v2
+        )
+        // V2 TxInfo: inputs, refInputs, outputs, fee, mint, dcert, wdrl,
+        // validRange, ...
+        let range = try #require(ctx.constrFields?[0].constrFields?[7])
+        #expect(range.constrTag == 0)
+        #expect(range.constrFields?[0].constrTag == 0)  // lower bound
+        #expect(range.constrFields?[1].constrTag == 0)  // upper bound
     }
 }
