@@ -174,6 +174,17 @@ if result.success {
 }
 ```
 
+All six redeemer purposes are evaluated: spending, minting, reward withdrawal,
+certificate (`Publishing`), vote and proposal. The script context each one gets is
+checked against the ledger's own, byte for byte — the fixtures under
+`Tests/.../Resources/ledgercontext` hold contexts taken from a synced node, and
+their README says how to make more.
+
+A transaction with a validity interval is still refused rather than approximated,
+because turning slots into POSIX milliseconds needs era history this library is not
+given, and an unbounded interval would quietly defeat every deadline check in the
+script.
+
 ---
 
 ## Architecture
@@ -214,7 +225,9 @@ SwiftCardanoUPLC
 │
 └── TX/
     ├── PhaseTwo         — transaction-level Phase-2 script evaluation
-    └── ScriptContext    — builds ScriptContext PlutusData for validators
+    ├── ScriptContext    — builds ScriptContext PlutusData for validators
+    ├── CertificateData  — certificates as TxCert (V3) and DCert (V1/V2)
+    └── GovernanceData   — voters, votes and proposal procedures as Data
 
 PlutusV3's ScriptContext is a different structure from V1/V2 rather than an
 extension of it: three top-level fields instead of two, sixteen TxInfo fields
