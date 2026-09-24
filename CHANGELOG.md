@@ -1,3 +1,13 @@
+## 0.6.0 (2026-09-23)
+
+### Feat
+
+- evaluate certificate, vote and proposal redeemers
+
+### Refactor
+
+- let equalsData use the value equality core now provides
+
 ## 0.5.0 (2026-09-23)
 
 ### Feat
