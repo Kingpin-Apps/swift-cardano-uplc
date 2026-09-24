@@ -272,9 +272,15 @@ public struct BuiltinRuntime: Sendable {
             guard case .bytes(let b) = pd else { throw MachineError.typeError("unBData") }
             return .con(.byteString(b.data))
         case .equalsData:
+            // `PlutusData`'s own equality compares structure and content and
+            // ignores how each part is represented, which is what the ledger
+            // compares. It has to: a datum read off the chain and the same value
+            // rebuilt by a script hold their bytes and their lists differently,
+            // and comparing that detail made correct validators reject good
+            // transactions.
             let a = try plutusData(args[0])
             let b = try plutusData(args[1])
-            return .con(.bool(PlutusDataSemantics.equal(a, b)))
+            return .con(.bool(a == b))
         case .serialiseData:
             let pd = try plutusData(args[0])
             let cborBytes = try pd.toCBORData()
