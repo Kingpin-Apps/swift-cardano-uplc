@@ -274,7 +274,7 @@ public struct BuiltinRuntime: Sendable {
         case .equalsData:
             let a = try plutusData(args[0])
             let b = try plutusData(args[1])
-            return .con(.bool(a == b))
+            return .con(.bool(PlutusDataSemantics.equal(a, b)))
         case .serialiseData:
             let pd = try plutusData(args[0])
             let cborBytes = try pd.toCBORData()
