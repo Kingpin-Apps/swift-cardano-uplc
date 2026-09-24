@@ -233,42 +233,63 @@ struct ScriptContextBuilderTests {
 
     // MARK: — Mint encoding
 
-    @Test("empty mint is an empty map")
+    /// V1 and V2 build the mint field as `zero lovelace <> the minted assets`, so
+    /// it always carries an ada entry of zero — even with nothing minted. V3
+    /// dropped that. The ledger keeps the quirk on purpose, because removing it
+    /// would change what scripts that already pass are handed.
+    @Test("an empty mint still carries a zero ada entry in V1 and V2")
     func txInfo_emptyMint() throws {
         let input = txInput()
         let utxo = try scriptUTxO()
         let body = TransactionBody(inputs: .list([input]), outputs: [], fee: 0)
         let tx = Transaction(transactionBody: body, transactionWitnessSet: TransactionWitnessSet())
 
-        let ctx = try ScriptContextBuilder().spendingContext(
-            transaction: tx, spentInput: input, resolvedInputs: [utxo], version: .v2
+        let v2 = try #require(
+            try ScriptContextBuilder().spendingContext(
+                transaction: tx, spentInput: input, resolvedInputs: [utxo], version: .v2
+            ).constrFields?[0].constrFields?[4].mapEntries
         )
-        let mint = try #require(ctx.constrFields?[0].constrFields?[4])
-        #expect(mint.mapEntries?.isEmpty == true)
+        #expect(v2.count == 1)
+        #expect(v2[emptyBytes]?.mapEntries?[emptyBytes]?.intValue == 0)
+
+        let v3 = try #require(
+            try ScriptContextBuilder().spendingContextV3(
+                transaction: tx, spentInput: input, resolvedInputs: [utxo],
+                redeemer: .bigInt(.int(42)), datum: nil
+            ).constrFields?[0].constrFields?[4]
+        )
+        #expect(v3.mapEntries?.isEmpty == true)
     }
 
-    @Test("mint field carries policy and token amounts, no ADA entry")
+    @Test("mint carries policy and token amounts, with an ada entry only before V3")
     func txInfo_mintWithAssets() throws {
         let policyId = ScriptHash(payload: Data(repeating: 0xCC, count: SCRIPT_HASH_SIZE))
         let assetName = AssetName(from: "TOKEN")
-        let asset = Asset([assetName: 42])
-        let mintAsset = MultiAsset([policyId: asset])
+        let mintAsset = MultiAsset([policyId: Asset([assetName: 42])])
+        let csKey = PlutusData.bytes(.byteString(ByteString(bytes: policyId.payload)))
+        let tnKey = PlutusData.bytes(.byteString(ByteString(bytes: assetName.payload)))
 
         let input = txInput()
         let utxo = try scriptUTxO()
         let body = TransactionBody(inputs: .list([input]), outputs: [], fee: 0, mint: mintAsset)
         let tx = Transaction(transactionBody: body, transactionWitnessSet: TransactionWitnessSet())
 
-        let ctx = try ScriptContextBuilder().spendingContext(
-            transaction: tx, spentInput: input, resolvedInputs: [utxo], version: .v2
+        let v2 = try #require(
+            try ScriptContextBuilder().spendingContext(
+                transaction: tx, spentInput: input, resolvedInputs: [utxo], version: .v2
+            ).constrFields?[0].constrFields?[4].mapEntries
         )
-        let mint = try #require(ctx.constrFields?[0].constrFields?[4].mapEntries)
-        let csKey = PlutusData.bytes(.byteString(ByteString(bytes: policyId.payload)))
-        // No ADA (empty) key in mint.
-        #expect(mint[emptyBytes] == nil)
-        let tokenMap = try #require(mint[csKey]?.mapEntries)
-        let tnKey = PlutusData.bytes(.byteString(ByteString(bytes: assetName.payload)))
-        #expect(tokenMap[tnKey]?.intValue == 42)
+        #expect(v2[emptyBytes]?.mapEntries?[emptyBytes]?.intValue == 0)
+        #expect(v2[csKey]?.mapEntries?[tnKey]?.intValue == 42)
+
+        let v3 = try #require(
+            try ScriptContextBuilder().spendingContextV3(
+                transaction: tx, spentInput: input, resolvedInputs: [utxo],
+                redeemer: .bigInt(.int(42)), datum: nil
+            ).constrFields?[0].constrFields?[4].mapEntries
+        )
+        #expect(v3[emptyBytes] == nil, "V3 never has an ada entry")
+        #expect(v3[csKey]?.mapEntries?[tnKey]?.intValue == 42)
     }
 
     // MARK: — Signatories
@@ -690,11 +711,20 @@ struct ScriptContextV3Tests {
 
     // MARK: - Refusals
 
-    @Test("a transaction with a validity interval is refused, not given an unbounded range")
-    func validityIntervalIsRefused() throws {
+    /// Handing the script the unbounded interval instead would quietly defeat
+    /// every deadline check it makes, which is far worse than refusing.
+    @Test("a validity interval without a slot timeline is refused, not made unbounded")
+    func validityIntervalWithoutATimelineIsRefused() throws {
         let f = try fixture(ttl: 1_000)
         #expect(throws: ScriptContextError.self) {
             try ScriptContextBuilder().spendingContextV3(
+                transaction: f.tx, spentInput: f.spent, resolvedInputs: f.utxos,
+                redeemer: redeemerData(), datum: nil
+            )
+        }
+        // With a timeline it goes through.
+        #expect(throws: Never.self) {
+            try ScriptContextBuilder(slotTimeline: .mainnet).spendingContextV3(
                 transaction: f.tx, spentInput: f.spent, resolvedInputs: f.utxos,
                 redeemer: redeemerData(), datum: nil
             )
@@ -737,6 +767,60 @@ struct ValidityRangeTests {
         #expect(range.constrTag == 0)
         #expect(range.constrFields?[0].constrTag == 0)  // lower bound
         #expect(range.constrFields?[1].constrTag == 0)  // upper bound
+    }
+
+    /// A transaction's bounds are slots, and they are not symmetric:
+    /// invalid-before includes its slot, invalid-hereafter excludes its. The
+    /// interval a script sees keeps that — a closed lower bound and a strict
+    /// upper one — so a script comparing against a deadline sees the first
+    /// instant the transaction is no longer valid.
+    @Test(
+        "the bounds carry POSIX milliseconds, and only the lower one is closed",
+        arguments: [
+            (SlotNumber?.none, SlotNumber?.none, [0, 2], [true, true]),
+            (SlotNumber?.some(4_492_800), nil, [1, 2], [true, true]),
+            (nil, SlotNumber?.some(4_492_800), [0, 1], [true, false]),
+            (SlotNumber?.some(4_492_800), SlotNumber?.some(4_492_801), [1, 1], [true, false]),
+        ]
+    )
+    func boundShapes(
+        validityStart: SlotNumber?, ttl: SlotNumber?,
+        extendedTags: [UInt64], closures: [Bool]
+    ) throws {
+        let spent = txInput()
+        let utxo = try scriptUTxO()
+        var body = TransactionBody(inputs: .list([spent]), outputs: [], fee: 0)
+        body.validityStart = validityStart
+        body.ttl = ttl
+        let tx = Transaction(transactionBody: body, transactionWitnessSet: TransactionWitnessSet())
+
+        let ctx = try ScriptContextBuilder(slotTimeline: .mainnet).spendingContext(
+            transaction: tx, spentInput: spent, resolvedInputs: [utxo], version: .v2
+        )
+        let range = try #require(ctx.constrFields?[0].constrFields?[7])
+        for (index, bound) in try #require(range.constrFields).enumerated() {
+            // `Extended` is NegInf(0), Finite(1), PosInf(2).
+            #expect(bound.constrFields?[0].constrTag == extendedTags[index])
+            // `Bool` is False(0), True(1).
+            #expect(bound.constrFields?[1].constrTag == (closures[index] ? 1 : 0))
+        }
+    }
+
+    @Test("a bound's time is the slot's, read through the chain's eras")
+    func boundTime() throws {
+        let spent = txInput()
+        let utxo = try scriptUTxO()
+        var body = TransactionBody(inputs: .list([spent]), outputs: [], fee: 0)
+        // The first Shelley slot, whose block really did begin at 1596059091.
+        body.validityStart = 4_492_800
+        let tx = Transaction(transactionBody: body, transactionWitnessSet: TransactionWitnessSet())
+
+        let ctx = try ScriptContextBuilder(slotTimeline: .mainnet).spendingContext(
+            transaction: tx, spentInput: spent, resolvedInputs: [utxo], version: .v2
+        )
+        let range = try #require(ctx.constrFields?[0].constrFields?[7])
+        let lower = try #require(range.constrFields?[0].constrFields?[0].constrFields?[0])
+        #expect(lower.intValue == 1_596_059_091_000)
     }
 }
 

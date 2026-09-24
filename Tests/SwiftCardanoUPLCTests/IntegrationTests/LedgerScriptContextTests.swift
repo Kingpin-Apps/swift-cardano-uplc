@@ -29,6 +29,9 @@ struct LedgerScriptContextTests {
         let redeemerTag: String
         let redeemerIndex: Int
         let protocolMajorVersion: Int
+        /// Which language's context this is. V1 and V2 see a different structure
+        /// from V3, not a smaller one.
+        let plutusVersion: String
         let expectedContext: String
     }
 
@@ -65,8 +68,11 @@ struct LedgerScriptContextTests {
             for: redeemer,
             transaction: transaction,
             resolvedInputs: resolvedInputs,
-            version: .v3,
-            protocolMajorVersion: fixture.protocolMajorVersion
+            version: try fixture.version,
+            protocolMajorVersion: fixture.protocolMajorVersion,
+            // The fixtures were generated against a mainnet node, so its slots
+            // are the ones the ledger converted.
+            slotTimeline: .mainnet
         )
 
         let built = try context.toCBORHex()
@@ -119,6 +125,20 @@ struct LedgerScriptContextTests {
             return index / 2
         }
         return lhs.count == rhs.count ? nil : min(lhs.count, rhs.count) / 2
+    }
+}
+
+extension LedgerScriptContextTests.Fixture {
+    var version: PlutusVersion {
+        get throws {
+            switch plutusVersion {
+                case "v1": return .v1
+                case "v2": return .v2
+                case "v3": return .v3
+                default:
+                    throw ScriptContextError.unsupportedVersion(plutusVersion)
+            }
+        }
     }
 }
 

@@ -27,8 +27,16 @@ public struct ScriptContextBuilder: Sendable {
     /// deposit is visible.
     public let protocolMajorVersion: Int
 
-    public init(protocolMajorVersion: Int = 10) {
+    /// How to turn a slot into the POSIX time a script sees.
+    ///
+    /// Needed only for a transaction that has a validity interval — which is most
+    /// of them. Without one, such a transaction is refused rather than handed the
+    /// unbounded interval.
+    public let slotTimeline: SlotTimeline?
+
+    public init(protocolMajorVersion: Int = 10, slotTimeline: SlotTimeline? = nil) {
         self.protocolMajorVersion = protocolMajorVersion
+        self.slotTimeline = slotTimeline
     }
 
     /// Build ScriptContext for a spending script.
@@ -38,7 +46,10 @@ public struct ScriptContextBuilder: Sendable {
         resolvedInputs: [UTxO],
         version: PlutusVersion = .v2
     ) throws -> PlutusData {
-        let txInfo = try buildTxInfo(transaction: transaction, resolvedInputs: resolvedInputs, version: version)
+        let txInfo = try buildTxInfo(
+            transaction: transaction, resolvedInputs: resolvedInputs, version: version,
+            slotTimeline: slotTimeline
+        )
         let purpose = try buildSpendingPurpose(input: spentInput)
         return buildScriptContext(txInfo: txInfo, purpose: purpose)
     }
@@ -50,7 +61,10 @@ public struct ScriptContextBuilder: Sendable {
         policyId: Data,
         version: PlutusVersion = .v2
     ) throws -> PlutusData {
-        let txInfo = try buildTxInfo(transaction: transaction, resolvedInputs: resolvedInputs, version: version)
+        let txInfo = try buildTxInfo(
+            transaction: transaction, resolvedInputs: resolvedInputs, version: version,
+            slotTimeline: slotTimeline
+        )
         let purpose = try buildMintingPurpose(policyId: policyId)
         return buildScriptContext(txInfo: txInfo, purpose: purpose)
     }
@@ -64,7 +78,8 @@ public struct ScriptContextBuilder: Sendable {
         version: PlutusVersion = .v2
     ) throws -> PlutusData {
         let txInfo = try buildTxInfo(
-            transaction: transaction, resolvedInputs: resolvedInputs, version: version
+            transaction: transaction, resolvedInputs: resolvedInputs, version: version,
+            slotTimeline: slotTimeline
         )
         let credential = try credentialData(hash: stakeCredentialHash, isScript: isScript)
         // Rewarding wraps the credential in StakingHash.
@@ -89,7 +104,8 @@ public struct ScriptContextBuilder: Sendable {
             )
         }
         let txInfo = try buildTxInfo(
-            transaction: transaction, resolvedInputs: resolvedInputs, version: version
+            transaction: transaction, resolvedInputs: resolvedInputs, version: version,
+            slotTimeline: slotTimeline
         )
         let purpose = constr(3, [try certificateDataV1V2(certificates[certificateIndex])])
         return buildScriptContext(txInfo: txInfo, purpose: purpose)
@@ -112,7 +128,8 @@ public struct ScriptContextBuilder: Sendable {
         let txInfo = try buildTxInfoV3(
             transaction: transaction,
             resolvedInputs: resolvedInputs,
-            protocolMajorVersion: protocolMajorVersion
+            protocolMajorVersion: protocolMajorVersion,
+            slotTimeline: slotTimeline
         )
         let scriptInfo = PlutusData.constructor(Constr(tag: 1, fields: [
             try outputReferenceV3(spentInput),
@@ -135,7 +152,8 @@ public struct ScriptContextBuilder: Sendable {
         let txInfo = try buildTxInfoV3(
             transaction: transaction,
             resolvedInputs: resolvedInputs,
-            protocolMajorVersion: protocolMajorVersion
+            protocolMajorVersion: protocolMajorVersion,
+            slotTimeline: slotTimeline
         )
         let scriptInfo = PlutusData.constructor(Constr(tag: 2, fields: [
             try credentialData(hash: stakeCredentialHash, isScript: isScript)
@@ -165,7 +183,8 @@ public struct ScriptContextBuilder: Sendable {
         let txInfo = try buildTxInfoV3(
             transaction: transaction,
             resolvedInputs: resolvedInputs,
-            protocolMajorVersion: protocolMajorVersion
+            protocolMajorVersion: protocolMajorVersion,
+            slotTimeline: slotTimeline
         )
         let scriptInfo = constr(3, [
             .bigInt(.int(Int64(certificateIndex))),
@@ -194,7 +213,8 @@ public struct ScriptContextBuilder: Sendable {
         let txInfo = try buildTxInfoV3(
             transaction: transaction,
             resolvedInputs: resolvedInputs,
-            protocolMajorVersion: protocolMajorVersion
+            protocolMajorVersion: protocolMajorVersion,
+            slotTimeline: slotTimeline
         )
         let scriptInfo = constr(4, [try voterData(voters[voterIndex])])
         return constr(0, [txInfo, redeemer, scriptInfo])
@@ -218,7 +238,8 @@ public struct ScriptContextBuilder: Sendable {
         let txInfo = try buildTxInfoV3(
             transaction: transaction,
             resolvedInputs: resolvedInputs,
-            protocolMajorVersion: protocolMajorVersion
+            protocolMajorVersion: protocolMajorVersion,
+            slotTimeline: slotTimeline
         )
         let scriptInfo = constr(5, [
             .bigInt(.int(Int64(proposalIndex))),
@@ -240,7 +261,8 @@ public struct ScriptContextBuilder: Sendable {
         let txInfo = try buildTxInfoV3(
             transaction: transaction,
             resolvedInputs: resolvedInputs,
-            protocolMajorVersion: protocolMajorVersion
+            protocolMajorVersion: protocolMajorVersion,
+            slotTimeline: slotTimeline
         )
         let scriptInfo = PlutusData.constructor(Constr(tag: 0, fields: [
             .bytes(try Bytes(from: policyId))
@@ -274,18 +296,10 @@ private func buildMintingPurpose(policyId: Data) throws -> PlutusData {
 private func buildTxInfo(
     transaction: Transaction,
     resolvedInputs: [UTxO],
-    version: PlutusVersion
+    version: PlutusVersion,
+    slotTimeline: SlotTimeline?
 ) throws -> PlutusData {
     let body = transaction.transactionBody
-
-    // Refuse what cannot be encoded faithfully rather than substituting an
-    // empty value, which silently changes what the script sees.
-    if body.ttl != nil || body.validityStart != nil {
-        throw ScriptContextError.unsupportedFeature(
-            "Transactions with a validity interval are not supported in the script context yet: "
-            + "converting slots to POSIX time needs era history that is not available here."
-        )
-    }
 
     // Inputs — resolved UTxOs in Plutus canonical order (sorted by txId bytes then index).
     // An input that cannot be resolved is an error: dropping it hands the
@@ -311,31 +325,29 @@ private func buildTxInfo(
     // Fee as a lovelace-only Value: Map { b"" => Map { b"" => fee } }
     let fee = valueDataFromCoin(Int(body.fee))
 
-    // Mint — policy tokens only (no ADA entry; ADA cannot be minted)
-    let mint: PlutusData
-    if let mintedAssets = body.mint {
-        mint = mintValueData(mintedAssets)
-    } else {
-        mint = .map([:])
-    }
+    // Mint, which in V1 and V2 always carries a zero-lovelace entry.
+    let mint = mintValueData(body.mint, version: version)
 
     // DCert — in the order the transaction lists them.
     let dcert = dataList(try (body.certificates?.asList ?? []).map { try certificateDataV1V2($0) })
 
-    // Withdrawals: `Map StakingCredential Integer` in V1/V2 (V3 keys these by
-    // `Credential` instead).
-    let wdrl = try withdrawalsDataV1V2(body.withdrawals)
+    // Withdrawals, keyed by `StakingCredential` — a list of pairs in V1 and a map
+    // in V2, in Plutus's credential order rather than the ledger's.
+    let wdrl = try withdrawalsDataV1V2(body.withdrawals, version: version)
 
-    // ValidRange — full open range; slot→POSIX conversion requires era data not available here
-    let validRange = buildFullRange()
+    let validRange = try validityRangeData(
+        validityStart: body.validityStart, ttl: body.ttl, slotTimeline: slotTimeline
+    )
 
     // Signatories
     let signatories = dataList(try (body.requiredSigners?.asList ?? []).map {
         PlutusData.bytes(try Bytes(from: $0.payload))
     })
 
-    // Datums from witness set: Map { DatumHash bytes => PlutusData }
-    let datums = try buildDatumsMap(witnesses: transaction.transactionWitnessSet)
+    // Datums from the witness set, ordered by hash — a list of pairs in V1.
+    let datums = try buildDatumsMap(
+        witnesses: transaction.transactionWitnessSet, version: version
+    )
 
     // Redeemers: `Map ScriptPurpose Redeemer`. V1 has no such field.
     let redeemers: PlutusData = version == .v1
@@ -383,22 +395,10 @@ private func buildTxInfo(
 private func buildTxInfoV3(
     transaction: Transaction,
     resolvedInputs: [UTxO],
-    protocolMajorVersion: Int
+    protocolMajorVersion: Int,
+    slotTimeline: SlotTimeline?
 ) throws -> PlutusData {
     let body = transaction.transactionBody
-
-    // Anything this builder cannot encode faithfully is refused rather than
-    // approximated — see `ScriptContextError.unsupportedFeature`.
-    if body.ttl != nil || body.validityStart != nil {
-        // The script context carries POSIX milliseconds, not slots. Converting
-        // needs the era history and genesis parameters, which this builder is
-        // not given — emitting the unbounded interval instead would quietly
-        // defeat every deadline check in the script.
-        throw ScriptContextError.unsupportedFeature(
-            "Transactions with a validity interval are not supported in the V3 script context yet: "
-            + "converting slots to POSIX time needs era history that is not available here."
-        )
-    }
 
     let inputs = dataList(
         try resolvedInputsData(for: body.inputs.asArray, resolvedInputs: resolvedInputs)
@@ -412,7 +412,7 @@ private func buildTxInfoV3(
     // Lovelace is a bare integer in V3, not a Value.
     let fee = PlutusData.bigInt(.int(Int64(body.fee)))
 
-    let mint = body.mint.map { mintValueData($0) } ?? .map([:])
+    let mint = mintValueData(body.mint, version: .v3)
 
     // Certificates keep the order the transaction lists them in — a
     // certificate redeemer's index counts through that same order.
@@ -422,7 +422,9 @@ private func buildTxInfoV3(
         }
     )
     let withdrawals = try withdrawalsDataV3(body.withdrawals)
-    let validRange = buildFullRange()
+    let validRange = try validityRangeData(
+        validityStart: body.validityStart, ttl: body.ttl, slotTimeline: slotTimeline
+    )
 
     let signatories = dataList(try (body.requiredSigners?.asList ?? []).map {
         PlutusData.bytes(try Bytes(from: $0.payload))
@@ -496,15 +498,35 @@ private func resolvedInputsData(
 ///
 /// V1/V2 wrap the credential in `StakingHash`; V3 keys the map by the bare
 /// `Credential` instead.
-private func withdrawalsDataV1V2(_ withdrawals: Withdrawals?) throws -> PlutusData {
-    let entries = orderedWithdrawalCredentials(withdrawals)
-    guard !entries.isEmpty else { return .map([:]) }
-    var map = OrderedDictionary<PlutusData, PlutusData>()
+/// `withdrawals` for V1 and V2, keyed by `StakingCredential`.
+///
+/// Two things differ from V3 and from each other. V1 holds these as a *list of
+/// pairs* and V2 as a map — `txInfoWdrl` changed type between the two. And the
+/// order is Plutus's rather than the ledger's: the ledger writes a script
+/// credential before a key one, while Plutus's own `Credential` declares
+/// `PubKeyCredential` first, so a V1 or V2 script sees them the other way round.
+/// A reward redeemer's *index* still counts in the ledger's order, because that is
+/// what the redeemer pointer is resolved against — so the two orders coexist in
+/// one context.
+private func withdrawalsDataV1V2(
+    _ withdrawals: Withdrawals?,
+    version: PlutusVersion
+) throws -> PlutusData {
+    let entries = orderedWithdrawalCredentials(withdrawals).sorted { lhs, rhs in
+        if lhs.isScript != rhs.isScript { return !lhs.isScript }
+        return lhs.hash.lexicographicallyPrecedes(rhs.hash)
+    }
+    var pairs: [(key: PlutusData, value: PlutusData)] = []
     for entry in entries {
         let credential = try credentialData(hash: entry.hash, isScript: entry.isScript)
-        map[.constructor(Constr(tag: 0, fields: [credential]))] = .bigInt(.int(entry.amount))
+        pairs.append((constr(0, [credential]), .bigInt(.int(entry.amount))))
     }
-    return .map(map)
+    if version == .v1 {
+        return dataList(pairs.map { constr(0, [$0.key, $0.value]) })
+    }
+    var map = OrderedDictionary<PlutusData, PlutusData>()
+    for pair in pairs { map[pair.key] = pair.value }
+    return map.isEmpty ? .map([:]) : .map(map)
 }
 
 /// `redeemers: Map ScriptPurpose Redeemer` for V2.
@@ -994,42 +1016,112 @@ private func valueDataFromCoin(_ coin: Int) -> PlutusData {
 }
 
 /// Encode a `MultiAsset` (the mint field) as a Plutus Value map — no ADA entry.
-private func mintValueData(_ multiAsset: MultiAsset) -> PlutusData {
+/// `mint`, which is a `Value` in V1 and V2 but a `MintValue` in V3.
+///
+/// The difference is one entry. V1 and V2 build it as `zero lovelace <> the
+/// minted assets`, so it always carries `{"": {"": 0}}` — even when nothing is
+/// minted at all. V3 dropped that, and never has an ada entry. The ledger keeps
+/// the quirk deliberately: removing it would change what scripts that already
+/// pass are handed.
+private func mintValueData(_ multiAsset: MultiAsset?, version: PlutusVersion) -> PlutusData {
     var map = OrderedDictionary<PlutusData, PlutusData>()
-    for (policyId, asset) in canonicalAssets(multiAsset) {
-        let csKey = PlutusData.bytes(.byteString(ByteString(bytes: policyId.payload)))
-        map[csKey] = .map(tokenMap(for: asset))
+    if version != .v3 {
+        map[.bytes(.byteString(ByteString(bytes: Data())))] = .map(
+            OrderedDictionary(uniqueKeysWithValues: [
+                (PlutusData.bytes(.byteString(ByteString(bytes: Data()))), PlutusData.bigInt(.int(0)))
+            ])
+        )
     }
-    return .map(map)
+    for (policyId, asset) in canonicalAssets(multiAsset ?? MultiAsset([:])) {
+        map[.bytes(.byteString(ByteString(bytes: policyId.payload)))] = .map(tokenMap(for: asset))
+    }
+    return map.isEmpty ? .map([:]) : .map(map)
 }
 
 // MARK: — Datums map
 
 /// Build `txInfoData`: `Map { DatumHash => Datum }` from the transaction witness set.
-private func buildDatumsMap(witnesses: TransactionWitnessSet) throws -> PlutusData {
-    var map = OrderedDictionary<PlutusData, PlutusData>()
-    for pd in witnesses.plutusData?.asList ?? [] {
-        if let cborData = try? pd.toCBORData(),
-           let hashBytes = try? Hash().blake2b(data: cborData, digestSize: 32, encoder: RawEncoder.self) {
-            let hashKey = PlutusData.bytes(.byteString(ByteString(bytes: hashBytes)))
-            map[hashKey] = pd
-        }
+/// `datums` — the witness set's data, keyed by datum hash.
+///
+/// The ledger keeps these in a map ordered by hash, so they reach a script in that
+/// order and not in the order the witness set happens to list them. V1 holds them
+/// as a list of pairs, as it does withdrawals; V2 and V3 hold a map.
+private func buildDatumsMap(
+    witnesses: TransactionWitnessSet,
+    version: PlutusVersion = .v3
+) throws -> PlutusData {
+    var pairs: [(hash: Data, key: PlutusData, value: PlutusData)] = []
+    for datum in witnesses.plutusData?.asList ?? [] {
+        guard let cborData = try? datum.toCBORData(),
+              let hashBytes = try? Hash().blake2b(
+                  data: cborData, digestSize: 32, encoder: RawEncoder.self
+              )
+        else { continue }
+        pairs.append((
+            hashBytes, .bytes(.byteString(ByteString(bytes: hashBytes))), datum
+        ))
     }
-    return .map(map)
+    pairs.sort { $0.hash.lexicographicallyPrecedes($1.hash) }
+
+    if version == .v1 {
+        return dataList(pairs.map { constr(0, [$0.key, $0.value]) })
+    }
+    var map = OrderedDictionary<PlutusData, PlutusData>()
+    for pair in pairs { map[pair.key] = pair.value }
+    return map.isEmpty ? .map([:]) : .map(map)
 }
 
 // MARK: — ValidRange
 
-private func buildFullRange() -> PlutusData {
-    let negInf = PlutusData.constructor(Constr(tag: 0, fields: []))  // NegInf
-    let posInf = PlutusData.constructor(Constr(tag: 2, fields: []))  // PosInf
-    // Both bounds are single-constructor records, so both are Constr 0.
-    // The upper bound used to be emitted as Constr 1, which made every
-    // validity-range check in a script read a malformed interval.
-    let closed = PlutusData.constructor(Constr(tag: 1, fields: []))  // True
-    let from = PlutusData.constructor(Constr(tag: 0, fields: [negInf, closed]))
-    let to = PlutusData.constructor(Constr(tag: 0, fields: [posInf, closed]))
-    return .constructor(Constr(tag: 0, fields: [from, to]))
+/// `Interval POSIXTime` — the transaction's validity interval as a script sees it,
+/// in POSIX milliseconds.
+///
+/// A transaction's bounds are slots: `validityStart` is `invalid_before`, which
+/// includes that slot, and `ttl` is `invalid_hereafter`, which excludes it. The
+/// interval a script gets keeps that asymmetry — a **closed** lower bound and a
+/// **strict** upper one — so a script comparing `ttl` against a deadline sees the
+/// first instant the transaction is no longer valid, not the last one it is.
+///
+/// A transaction with no bounds gets the unbounded interval, which is the one
+/// thing that can be built without knowing when a slot happens.
+private func validityRangeData(
+    validityStart: SlotNumber?,
+    ttl: SlotNumber?,
+    slotTimeline: SlotTimeline?
+) throws -> PlutusData {
+    let negativeInfinity = constr(0, [])
+    let positiveInfinity = constr(2, [])
+    /// `Bool` — `False` is constructor 0 and `True` is 1.
+    func closure(_ isClosed: Bool) -> PlutusData { constr(isClosed ? 1 : 0, []) }
+    func bound(_ extended: PlutusData, closed: Bool) -> PlutusData {
+        constr(0, [extended, closure(closed)])
+    }
+    func finite(_ slot: SlotNumber, _ timeline: SlotTimeline) -> PlutusData {
+        constr(1, [.bigInt(.int(timeline.milliseconds(forSlot: slot)))])
+    }
+
+    guard validityStart != nil || ttl != nil else {
+        return constr(0, [
+            bound(negativeInfinity, closed: true),
+            bound(positiveInfinity, closed: true),
+        ])
+    }
+    guard let slotTimeline else {
+        // Substituting the unbounded interval would quietly defeat every deadline
+        // check in the script, which is far worse than refusing.
+        throw ScriptContextError.unsupportedFeature(
+            "This transaction has a validity interval, so building its script context needs a "
+            + "SlotTimeline to turn slots into POSIX time. Pass one to ScriptContextBuilder or "
+            + "PhaseTwo — SlotTimeline.mainnet and its siblings cover the public networks, and "
+            + "SlotTimeline(systemStart:eraHistory:) reads whatever a node reports."
+        )
+    }
+    return constr(0, [
+        validityStart.map { bound(finite($0, slotTimeline), closed: true) }
+            ?? bound(negativeInfinity, closed: true),
+        ttl.map { bound(finite($0, slotTimeline), closed: false) }
+            ?? bound(positiveInfinity, closed: true),
+    ])
 }
 
 // MARK: — Data extension helper

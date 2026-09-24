@@ -49,12 +49,21 @@ public struct PhaseTwo: @unchecked Sendable {
     /// The protocol version the transaction is validated under — see
     /// ``ScriptContextBuilder/protocolMajorVersion``.
     private let protocolMajorVersion: Int
+    /// How to turn a slot into POSIX time — see
+    /// ``ScriptContextBuilder/slotTimeline``. A transaction with a validity
+    /// interval cannot be evaluated without one.
+    private let slotTimeline: SlotTimeline?
 
     /// Primary initializer — caller supplies a cost model used for every
     /// language version.
-    public init(costModel: CostModel, protocolMajorVersion: Int = 10) {
+    public init(
+        costModel: CostModel,
+        protocolMajorVersion: Int = 10,
+        slotTimeline: SlotTimeline? = nil
+    ) {
         self.costModels = [.v1: costModel, .v2: costModel, .v3: costModel]
         self.protocolMajorVersion = protocolMajorVersion
+        self.slotTimeline = slotTimeline
     }
 
     /// Derive cost models from protocol parameters.
@@ -66,8 +75,13 @@ public struct PhaseTwo: @unchecked Sendable {
     ///
     /// - Parameter version: when given, only that version's model is built and
     ///   it is used for every script. Prefer omitting it.
-    public init(protocolParameters: ProtocolParameters, version: PlutusVersion? = nil) throws {
+    public init(
+        protocolParameters: ProtocolParameters,
+        version: PlutusVersion? = nil,
+        slotTimeline: SlotTimeline? = nil
+    ) throws {
         self.protocolMajorVersion = Int(protocolParameters.protocolVersion.major)
+        self.slotTimeline = slotTimeline
         if let version {
             let model = try CostModel.fromProtocolParams(protocolParameters, version: version)
             self.costModels = [.v1: model, .v2: model, .v3: model]
@@ -102,6 +116,7 @@ public struct PhaseTwo: @unchecked Sendable {
     ) async throws -> PhaseTwoResult {
         let costModels = self.costModels
         let protocolMajorVersion = self.protocolMajorVersion
+        let slotTimeline = self.slotTimeline
         let redeemers: [Redeemer]
         if let rs = transaction.transactionWitnessSet.redeemers {
             switch rs {
@@ -157,7 +172,8 @@ public struct PhaseTwo: @unchecked Sendable {
                         transaction: transaction,
                         resolvedInputs: resolvedInputs,
                         costModels: costModels,
-                        protocolMajorVersion: protocolMajorVersion
+                        protocolMajorVersion: protocolMajorVersion,
+                        slotTimeline: slotTimeline
                     )
                 }
             }
@@ -197,7 +213,8 @@ private func evaluateSingleScript(
     transaction: Transaction,
     resolvedInputs: [UTxO],
     costModels: [PlutusVersion: CostModel],
-    protocolMajorVersion: Int
+    protocolMajorVersion: Int,
+    slotTimeline: SlotTimeline?
 ) async -> RedeemerResult {
     do {
         let (scriptData, version) = try findScript(
@@ -208,7 +225,7 @@ private func evaluateSingleScript(
         let scriptContext = try buildScriptContext(
             for: redeemer, transaction: transaction,
             resolvedInputs: resolvedInputs, version: version,
-            protocolMajorVersion: protocolMajorVersion
+            protocolMajorVersion: protocolMajorVersion, slotTimeline: slotTimeline
         )
         let applied = try applyArguments(
             program: program, redeemer: redeemer, scriptContext: scriptContext,
@@ -495,9 +512,12 @@ func buildScriptContext(
     transaction: Transaction,
     resolvedInputs: [UTxO],
     version: PlutusVersion,
-    protocolMajorVersion: Int
+    protocolMajorVersion: Int,
+    slotTimeline: SlotTimeline?
 ) throws -> PlutusData {
-    let builder = ScriptContextBuilder(protocolMajorVersion: protocolMajorVersion)
+    let builder = ScriptContextBuilder(
+        protocolMajorVersion: protocolMajorVersion, slotTimeline: slotTimeline
+    )
     let body = transaction.transactionBody
 
     switch redeemer.tag {
