@@ -5,9 +5,9 @@ A Swift implementation of the Cardano **Untyped Plutus Core (UPLC)** runtime. It
 - **Parser** — parse UPLC textual programs into an AST
 - **Pretty Printer** — serialize an AST back to UPLC text
 - **De Bruijn Converter** — convert between named and De Bruijn–indexed representations
-- **CEK Machine** — evaluate UPLC programs with a configurable cost model and execution budget
+- **CEK Machine** — evaluate UPLC programs under the chain's real cost model and execution budget
 - **Flat Encoder / Decoder** — encode programs to / decode programs from the on-chain binary format
-- **Phase-Two Validation** — evaluate all Plutus scripts in a Cardano transaction
+- **Phase-Two Validation** — evaluate all Plutus scripts in a Cardano transaction, PlutusV1 through V3
 
 ---
 
@@ -88,7 +88,7 @@ let namedDB = try DeBruijnConverter().convertToNamed(
     DeBruijnConverter().convert(named)
 )
 
-var machine = CEKMachine(budget: .unlimited, costModel: .defaultV2())
+var machine = CEKMachine(budget: .unlimited, costModel: .placeholder())
 let result = try machine.run(namedDB)
 
 // result.term == .constant(.integer(42))
@@ -101,23 +101,38 @@ if case .constant(.integer(let n)) = result.term {
 
 ```swift
 // Mainnet-equivalent restricted budget
-var machine = CEKMachine(budget: .restricted, costModel: .defaultV2())
+var machine = CEKMachine(budget: .restricted, costModel: .placeholder())
 
 // Custom budget
 var machine = CEKMachine(
     budget: ExBudget(cpu: 10_000_000_000, mem: 14_000_000),
-    costModel: .defaultV2()
+    costModel: .placeholder()
 )
 ```
 
-#### Cost model from chain context
+#### Cost model from protocol parameters
 
-For production use, load the cost model from live protocol parameters:
+`.placeholder()` is not the chain's cost model — its budgets mean nothing, and it
+reports ``isApproximate`` so callers can tell. For anything that matters, build the
+real model from protocol parameters:
 
 ```swift
-let costModel = try await CostModel.fromChainContext(myChainContext)
-var machine = CEKMachine(budget: .restricted, costModel: costModel)
+let params    = try await chainContext.protocolParameters()
+let costModel = try CostModel.fromProtocolParams(params, version: .v3)
+var machine   = CEKMachine(budget: .restricted, costModel: costModel)
 ```
+
+A cost model belongs to one Plutus version. Protocol parameters carry each version's
+model as a bare array of integers, tagged by position; the costing *shapes* come from
+the Plutus release and differ between V1/V2 and V3 for a handful of builtins, so
+costing a V3 script with the V2 model gives wrong budgets.
+
+Older chains send shorter arrays that do not name the newest builtins' parameters.
+Those builtins are left unpriced rather than the whole model being rejected, and a
+script that somehow calls one is reported instead of running free.
+
+The implementation is checked against the Plutus conformance suite's own expected
+budgets — all 511 comparable cases are reproduced exactly.
 
 ### Flat encoding
 
@@ -140,11 +155,13 @@ let decodedFromHex = try FlatDecoder().decodeHex(hex)
 
 ```swift
 import SwiftCardanoUPLC
-import SwiftCardanoChain
 
-let phaseTwo = PhaseTwo(chainContext: myChainContext)
-let result = try await phaseTwo.evaluate(
+let params   = try await chainContext.protocolParameters()
+let phaseTwo = try PhaseTwo(protocolParameters: params)
+let result   = try await phaseTwo.evaluate(
     transaction: tx,
+    // Every input the transaction references, reference inputs included — a
+    // script spending through a reference script has no script in its witness set.
     resolvedInputs: resolvedUTxOs
 )
 
@@ -180,7 +197,9 @@ SwiftCardanoUPLC
 │
 ├── Machine/
 │   ├── CEKMachine       — evaluator (Control/Environment/Continuation)
-│   ├── CostModel        — ExBudget, MachineStepCosts, per-builtin costs
+│   ├── CostModel        — build the chain's cost model from protocol parameters
+│   ├── CostingFunction  — the cost-function shapes a builtin can be priced by
+│   ├── ExMemory         — how the cost model measures an argument's size
 │   ├── EvalResult       — final term + remaining budget + trace logs
 │   └── MachineError     — evaluation failure cases
 │
@@ -191,11 +210,16 @@ SwiftCardanoUPLC
 │   └── BitReader        — bit-level read buffer (MSB-first)
 │
 ├── Builtins/
-│   └── DefaultFunction  — 86 built-in functions with arity and force counts
+│   └── DefaultFunction  — built-in functions with arity and force counts
 │
 └── TX/
     ├── PhaseTwo         — transaction-level Phase-2 script evaluation
     └── ScriptContext    — builds ScriptContext PlutusData for validators
+
+PlutusV3's ScriptContext is a different structure from V1/V2 rather than an
+extension of it: three top-level fields instead of two, sixteen TxInfo fields
+instead of twelve, an integer fee, a raw transaction id, and a ScriptInfo
+carrying the datum — which is why a V3 script takes a single argument.
 ```
 
 ### Program lifecycle
