@@ -335,6 +335,22 @@ private func findScript(
         }
         targetHash = sortedPolicies[redeemer.index].payload
 
+    case .reward:
+        // The index counts through the withdrawals in the ledger's reward
+        // account order, which puts script credentials before key ones.
+        let entries = orderedWithdrawalCredentials(body.withdrawals)
+        guard redeemer.index < entries.count else {
+            throw MachineError.typeError(
+                "findScript: reward redeemer index \(redeemer.index) out of range")
+        }
+        let credential = entries[redeemer.index]
+        guard credential.isScript else {
+            throw MachineError.typeError(
+                "findScript: reward redeemer points at a key-credential withdrawal, "
+                + "which needs a signature rather than a script")
+        }
+        targetHash = credential.hash
+
     default:
         throw MachineError.typeError("findScript: redeemer tag \(String(describing: redeemer.tag)) not yet supported")
     }
@@ -436,6 +452,29 @@ private func buildScriptContext(
             transaction: transaction,
             resolvedInputs: resolvedInputs,
             policyId: policyId,
+            version: version
+        )
+
+    case .reward:
+        let entries = orderedWithdrawalCredentials(body.withdrawals)
+        guard redeemer.index < entries.count else {
+            throw MachineError.typeError("buildScriptContext: reward index out of range")
+        }
+        let credential = entries[redeemer.index]
+        if version == .v3 {
+            return try builder.rewardingContextV3(
+                transaction: transaction,
+                resolvedInputs: resolvedInputs,
+                stakeCredentialHash: credential.hash,
+                isScript: credential.isScript,
+                redeemer: redeemer.data
+            )
+        }
+        return try builder.rewardingContext(
+            transaction: transaction,
+            resolvedInputs: resolvedInputs,
+            stakeCredentialHash: credential.hash,
+            isScript: credential.isScript,
             version: version
         )
 

@@ -43,9 +43,16 @@ print("All scripts passed. Remaining budgets: \(result.redeemers.map(\.remaining
 |-----|-------|
 | `.spend` | V1/V2 receive datum, redeemer and context. V3 receives the context alone. |
 | `.mint` | V1/V2 receive redeemer and context. V3 receives the context alone. |
+| `.reward` | A script withdrawal. V1/V2 name the purpose `Rewarding` and wrap the credential in `StakingHash`; V3 names it `Withdrawing` and keys it by the bare `Credential`. |
 
-Reward, cert, vote and propose redeemers are not supported yet and throw a
-``MachineError``.
+A reward redeemer's index counts through the transaction's withdrawals in the
+ledger's reward-account order, which places script credentials before key ones.
+Pointing one at a key-credential withdrawal is an error — that withdrawal needs
+a signature, not a script.
+
+Cert, vote and propose redeemers are not supported yet and throw a
+``MachineError``. They need the ledger's certificates and governance
+procedures encoded as `Data`, which is still to be done.
 
 ### Transactions the script context cannot represent
 

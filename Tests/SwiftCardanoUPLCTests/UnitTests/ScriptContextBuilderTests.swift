@@ -17,9 +17,14 @@ private extension PlutusData {
         if case .constructor(let c) = self { return c.fields }
         return nil
     }
+    /// A `Data` list, in either representation: the builder emits the
+    /// ledger's canonical indefinite form for non-empty lists.
     var arrayItems: [PlutusData]? {
-        if case .array(let a) = self { return a }
-        return nil
+        switch self {
+        case .array(let items):           return items
+        case .indefiniteArray(let items): return items.getAll()
+        default:                          return nil
+        }
     }
     var mapEntries: OrderedDictionary<PlutusData, PlutusData>? {
         if case .map(let m) = self { return m }
@@ -732,5 +737,163 @@ struct ValidityRangeTests {
         #expect(range.constrTag == 0)
         #expect(range.constrFields?[0].constrTag == 0)  // lower bound
         #expect(range.constrFields?[1].constrTag == 0)  // upper bound
+    }
+}
+
+// MARK: — Reward withdrawals
+
+/// A reward redeemer's index counts through the transaction's withdrawals in
+/// the ledger's reward-account order, which places script credentials before
+/// key credentials. `findScript`, the redeemers map and the withdrawals field
+/// all have to agree on that order.
+@Suite("Reward withdrawal script purposes")
+struct RewardPurposeTests {
+
+    private func rewardAccount(_ byte: UInt8, isScript: Bool) -> Data {
+        Data([isScript ? 0xF1 : 0xE1]) + Data(repeating: byte, count: SCRIPT_HASH_SIZE)
+    }
+
+    private func withdrawals(_ entries: [(UInt8, Bool, Int)]) -> Withdrawals {
+        var map = OrderedDictionary<RewardAccount, Coin>()
+        for (byte, isScript, amount) in entries {
+            map[rewardAccount(byte, isScript: isScript)] = Coin(amount)
+        }
+        return Withdrawals(map)
+    }
+
+    @Test("script credentials are ordered before key credentials")
+    func scriptCredentialsSortFirst() {
+        // Declared key-first and with a higher hash, so only the ledger's rule
+        // produces this order.
+        let ordered = orderedWithdrawalCredentials(withdrawals([
+            (0x11, false, 5), (0xCC, true, 7), (0x22, true, 9),
+        ]))
+        #expect(ordered.map(\.isScript) == [true, true, false])
+        #expect(ordered.map { $0.hash.first } == [0x22, 0xCC, 0x11])
+        #expect(ordered.map(\.amount) == [9, 7, 5])
+    }
+
+    @Test("V3 withdrawing ScriptInfo carries the bare credential")
+    func v3WithdrawingScriptInfo() throws {
+        let body = TransactionBody(
+            inputs: .list([txInput()]), outputs: [], fee: 0,
+            withdrawals: withdrawals([(0xAA, true, 0)])
+        )
+        let tx = Transaction(transactionBody: body, transactionWitnessSet: TransactionWitnessSet())
+
+        let ctx = try ScriptContextBuilder().rewardingContextV3(
+            transaction: tx, resolvedInputs: [try scriptUTxO()],
+            stakeCredentialHash: Data(repeating: 0xAA, count: SCRIPT_HASH_SIZE),
+            redeemer: .bigInt(.int(0))
+        )
+        let info = try #require(ctx.constrFields?[2])
+        #expect(info.constrTag == 2)                       // Withdrawing
+        #expect(info.constrFields?.first?.constrTag == 1)  // Script credential
+        #expect(info.constrFields?.first?.constrFields?.first?.bytesData
+                == Data(repeating: 0xAA, count: SCRIPT_HASH_SIZE))
+    }
+
+    @Test("V1/V2 rewarding purpose wraps the credential in StakingHash")
+    func v1v2RewardingPurpose() throws {
+        let body = TransactionBody(
+            inputs: .list([txInput()]), outputs: [], fee: 0,
+            withdrawals: withdrawals([(0xAA, true, 0)])
+        )
+        let tx = Transaction(transactionBody: body, transactionWitnessSet: TransactionWitnessSet())
+
+        let ctx = try ScriptContextBuilder().rewardingContext(
+            transaction: tx, resolvedInputs: [try scriptUTxO()],
+            stakeCredentialHash: Data(repeating: 0xAA, count: SCRIPT_HASH_SIZE),
+            version: .v2
+        )
+        let purpose = try #require(ctx.constrFields?[1])
+        #expect(purpose.constrTag == 2)                        // Rewarding
+        let staking = try #require(purpose.constrFields?.first)
+        #expect(staking.constrTag == 0)                        // StakingHash
+        #expect(staking.constrFields?.first?.constrTag == 1)   // Script credential
+    }
+
+    @Test("withdrawals appear in the TxInfo keyed by credential")
+    func withdrawalsInTxInfo() throws {
+        let body = TransactionBody(
+            inputs: .list([txInput()]), outputs: [], fee: 0,
+            withdrawals: withdrawals([(0x11, false, 5), (0xAA, true, 7)])
+        )
+        let tx = Transaction(transactionBody: body, transactionWitnessSet: TransactionWitnessSet())
+        let ctx = try ScriptContextBuilder().rewardingContextV3(
+            transaction: tx, resolvedInputs: [try scriptUTxO()],
+            stakeCredentialHash: Data(repeating: 0xAA, count: SCRIPT_HASH_SIZE),
+            redeemer: .bigInt(.int(0))
+        )
+        let entries = try #require(ctx.constrFields?[0].constrFields?[6].mapEntries)
+        #expect(entries.count == 2)
+        // Script credential first.
+        #expect(entries.keys.first?.constrTag == 1)
+        #expect(entries.values.first?.intValue == 7)
+    }
+}
+
+// MARK: — Canonical Data encoding
+
+@Suite("Script context Data is canonical")
+struct CanonicalContextDataTests {
+
+    /// Plutus writes a non-empty `Data` list as an indefinite-length array and
+    /// an empty one as a definite empty array. A list built the definite way
+    /// serialises differently from the one the ledger hands the script.
+    @Test("non-empty lists are indefinite, empty lists are definite")
+    func listEncoding() throws {
+        let input = txInput()
+        let body = TransactionBody(inputs: .list([input]), outputs: [], fee: 0)
+        let tx = Transaction(transactionBody: body, transactionWitnessSet: TransactionWitnessSet())
+
+        let ctx = try ScriptContextBuilder().spendingContextV3(
+            transaction: tx, spentInput: input, resolvedInputs: [try scriptUTxO()],
+            redeemer: .bigInt(.int(0)), datum: nil
+        )
+        let txInfo = try #require(ctx.constrFields?[0].constrFields)
+
+        if case .indefiniteArray = txInfo[0] {} else {
+            Issue.record("non-empty inputs list should be indefinite, got \(txInfo[0])")
+        }
+        if case .array(let empty) = txInfo[1] { #expect(empty.isEmpty) } else {
+            Issue.record("empty reference inputs list should be a definite empty array")
+        }
+    }
+
+    /// `MultiAsset` is backed by a Swift `Dictionary`, whose order is
+    /// arbitrary and randomised per process. A Plutus `Value` is a map the
+    /// ledger builds in ascending bytewise order.
+    @Test("value maps are ordered by policy then asset name")
+    func valueOrdering() throws {
+        var multiAsset = MultiAsset([:])
+        for policyByte in [UInt8(0xCC), 0x11, 0x77] {
+            let policy = try ScriptHash(payload: Data(repeating: policyByte, count: SCRIPT_HASH_SIZE))
+            multiAsset[policy] = Asset([
+                try AssetName(payload: Data([0x7A])): 1,
+                try AssetName(payload: Data([0x0A])): 2,
+            ])
+        }
+        let input = txInput()
+        let output = TransactionOutput(
+            address: try vkeyAddress(),
+            amount: Value(coin: 1_000_000, multiAsset: multiAsset)
+        )
+        let body = TransactionBody(inputs: .list([input]), outputs: [output], fee: 0)
+        let tx = Transaction(transactionBody: body, transactionWitnessSet: TransactionWitnessSet())
+
+        let ctx = try ScriptContextBuilder().spendingContextV3(
+            transaction: tx, spentInput: input, resolvedInputs: [try scriptUTxO()],
+            redeemer: .bigInt(.int(0)), datum: nil
+        )
+        let outputs = try #require(ctx.constrFields?[0].constrFields?[2].arrayItems)
+        let value = try #require(outputs[0].constrFields?[1].mapEntries)
+
+        // Lovelace sits under the empty policy, which sorts first.
+        let policies = value.keys.map { $0.bytesData?.first }
+        #expect(policies == [nil, 0x11, 0x77, 0xCC])
+
+        let tokens = try #require(value.values.dropFirst().first?.mapEntries)
+        #expect(tokens.keys.map { $0.bytesData?.first } == [0x0A, 0x7A])
     }
 }

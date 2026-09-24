@@ -46,6 +46,25 @@ public struct ScriptContextBuilder: Sendable {
         return buildScriptContext(txInfo: txInfo, purpose: purpose)
     }
 
+    /// Build ScriptContext for a reward-withdrawal script (V1/V2).
+    public func rewardingContext(
+        transaction: Transaction,
+        resolvedInputs: [UTxO],
+        stakeCredentialHash: Data,
+        isScript: Bool = true,
+        version: PlutusVersion = .v2
+    ) throws -> PlutusData {
+        let txInfo = try buildTxInfo(
+            transaction: transaction, resolvedInputs: resolvedInputs, version: version
+        )
+        let credential = try credentialData(hash: stakeCredentialHash, isScript: isScript)
+        // Rewarding wraps the credential in StakingHash.
+        let purpose = PlutusData.constructor(Constr(tag: 2, fields: [
+            .constructor(Constr(tag: 0, fields: [credential]))
+        ]))
+        return buildScriptContext(txInfo: txInfo, purpose: purpose)
+    }
+
     // MARK: - PlutusV3
 
     /// Build the PlutusV3 `ScriptContext` for a spending script.
@@ -64,6 +83,24 @@ public struct ScriptContextBuilder: Sendable {
         let scriptInfo = PlutusData.constructor(Constr(tag: 1, fields: [
             try outputReferenceV3(spentInput),
             maybeData(datum),
+        ]))
+        return .constructor(Constr(tag: 0, fields: [txInfo, redeemer, scriptInfo]))
+    }
+
+    /// Build the PlutusV3 `ScriptContext` for a reward-withdrawal script.
+    ///
+    /// V3's `ScriptInfo` names this purpose `Withdrawing` and keys it by the
+    /// bare `Credential`, where V1/V2 wrap it in `StakingHash`.
+    public func rewardingContextV3(
+        transaction: Transaction,
+        resolvedInputs: [UTxO],
+        stakeCredentialHash: Data,
+        isScript: Bool = true,
+        redeemer: PlutusData
+    ) throws -> PlutusData {
+        let txInfo = try buildTxInfoV3(transaction: transaction, resolvedInputs: resolvedInputs)
+        let scriptInfo = PlutusData.constructor(Constr(tag: 2, fields: [
+            try credentialData(hash: stakeCredentialHash, isScript: isScript)
         ]))
         return .constructor(Constr(tag: 0, fields: [txInfo, redeemer, scriptInfo]))
     }
@@ -129,12 +166,12 @@ private func buildTxInfo(
     // Inputs — resolved UTxOs in Plutus canonical order (sorted by txId bytes then index).
     // An input that cannot be resolved is an error: dropping it hands the
     // script a transaction that spends less than it really does.
-    let inputs = PlutusData.array(
+    let inputs = dataList(
         try resolvedInputsData(for: body.inputs.asArray, resolvedInputs: resolvedInputs, version: version)
     )
 
     // Reference inputs (V2+).
-    let refInputs = PlutusData.array(
+    let refInputs = dataList(
         version == .v1
             ? []
             : try resolvedInputsData(
@@ -145,7 +182,7 @@ private func buildTxInfo(
     )
 
     // Outputs — in declaration order
-    let outputs = PlutusData.array(try body.outputs.map { try txOutData($0, version: version) })
+    let outputs = dataList(try body.outputs.map { try txOutData($0, version: version) })
 
     // Fee as a lovelace-only Value: Map { b"" => Map { b"" => fee } }
     let fee = valueDataFromCoin(Int(body.fee))
@@ -159,7 +196,7 @@ private func buildTxInfo(
     }
 
     // DCert — certificates are refused above, so this is genuinely empty.
-    let dcert = PlutusData.array([])
+    let dcert = dataList([])
 
     // Withdrawals: `Map StakingCredential Integer` in V1/V2 (V3 keys these by
     // `Credential` instead).
@@ -169,7 +206,7 @@ private func buildTxInfo(
     let validRange = buildFullRange()
 
     // Signatories
-    let signatories = PlutusData.array(try (body.requiredSigners?.asList ?? []).map {
+    let signatories = dataList(try (body.requiredSigners?.asList ?? []).map {
         PlutusData.bytes(try Bytes(from: $0.payload))
     })
 
@@ -237,7 +274,7 @@ private func buildTxInfoV3(
             "Transactions with voting procedures are not supported in the V3 script context yet."
         )
     }
-    if body.proposalProcedures != nil {
+    if let proposals = body.proposalProcedures, proposals.count > 0 {
         throw ScriptContextError.unsupportedFeature(
             "Transactions with proposal procedures are not supported in the V3 script context yet."
         )
@@ -253,25 +290,25 @@ private func buildTxInfoV3(
         )
     }
 
-    let inputs = PlutusData.array(
+    let inputs = dataList(
         try resolvedInputsData(for: body.inputs.asArray, resolvedInputs: resolvedInputs)
     )
-    let referenceInputs = PlutusData.array(
+    let referenceInputs = dataList(
         try resolvedInputsData(for: body.referenceInputs?.asList ?? [], resolvedInputs: resolvedInputs)
     )
 
-    let outputs = PlutusData.array(try body.outputs.map { try txOutData($0, version: .v3) })
+    let outputs = dataList(try body.outputs.map { try txOutData($0, version: .v3) })
 
     // Lovelace is a bare integer in V3, not a Value.
     let fee = PlutusData.bigInt(.int(Int64(body.fee)))
 
     let mint = body.mint.map { mintValueData($0) } ?? .map([:])
 
-    let certificates = PlutusData.array([])
+    let certificates = dataList([])
     let withdrawals = try withdrawalsDataV3(body.withdrawals)
     let validRange = buildFullRange()
 
-    let signatories = PlutusData.array(try (body.requiredSigners?.asList ?? []).map {
+    let signatories = dataList(try (body.requiredSigners?.asList ?? []).map {
         PlutusData.bytes(try Bytes(from: $0.payload))
     })
 
@@ -282,7 +319,7 @@ private func buildTxInfoV3(
     let txId = PlutusData.bytes(try Bytes(from: body.id.payload))
 
     let votes = PlutusData.map([:])
-    let proposals = PlutusData.array([])
+    let proposals = dataList([])
     let treasuryAmount = maybeData(body.currentTreasuryAmount.map { .bigInt(.int(Int64($0))) })
     let treasuryDonation = maybeData(body.treasuryDonation.map { .bigInt(.int(Int64($0.value))) })
 
@@ -335,27 +372,12 @@ private func resolvedInputsData(
 /// V1/V2 wrap the credential in `StakingHash`; V3 keys the map by the bare
 /// `Credential` instead.
 private func withdrawalsDataV1V2(_ withdrawals: Withdrawals?) throws -> PlutusData {
-    guard let withdrawals, !withdrawals.data.isEmpty else { return .map([:]) }
-
-    var entries: [(isScript: Bool, hash: Data, amount: Int64)] = []
-    for (rewardAccount, coin) in withdrawals.data {
-        guard let header = rewardAccount.first else { continue }
-        entries.append((
-            isScript: (header & 0x10) != 0,
-            hash: Data(rewardAccount.dropFirst()),
-            amount: Int64(coin)
-        ))
-    }
-    entries.sort {
-        if $0.isScript != $1.isScript { return $0.isScript }
-        return $0.hash.lexicographicallyPrecedes($1.hash)
-    }
-
+    let entries = orderedWithdrawalCredentials(withdrawals)
+    guard !entries.isEmpty else { return .map([:]) }
     var map = OrderedDictionary<PlutusData, PlutusData>()
     for entry in entries {
         let credential = try credentialData(hash: entry.hash, isScript: entry.isScript)
-        let stakingCredential = PlutusData.constructor(Constr(tag: 0, fields: [credential]))
-        map[stakingCredential] = .bigInt(.int(entry.amount))
+        map[.constructor(Constr(tag: 0, fields: [credential]))] = .bigInt(.int(entry.amount))
     }
     return .map(map)
 }
@@ -414,6 +436,19 @@ private func redeemersMapV1V2(transaction: Transaction) throws -> PlutusData {
                 .bytes(try Bytes(from: sortedPolicies[entry.index].payload))
             ]))
             pairs.append((0, purpose, entry.data))
+        case .reward:
+            let entries = orderedWithdrawalCredentials(body.withdrawals)
+            guard entry.index < entries.count else {
+                throw ScriptContextError.unsupportedFeature(
+                    "Reward redeemer index \(entry.index) is out of range for the transaction's withdrawals."
+                )
+            }
+            let credential = entries[entry.index]
+            let inner = try credentialData(hash: credential.hash, isScript: credential.isScript)
+            let purpose = PlutusData.constructor(Constr(tag: 2, fields: [
+                .constructor(Constr(tag: 0, fields: [inner]))
+            ]))
+            pairs.append((2, purpose, entry.data))
         default:
             throw ScriptContextError.unsupportedFeature(
                 "Redeemer purpose \(String(describing: entry.tag)) is not supported in the "
@@ -441,33 +476,56 @@ private func outputReferenceV3(_ input: TransactionInput) throws -> PlutusData {
     ]))
 }
 
-/// `Credential` — `VerificationKey` is constructor 0, `Script` is 1.
-private func credentialData(hash: Data, isScript: Bool) throws -> PlutusData {
-    .constructor(Constr(tag: isScript ? 1 : 0, fields: [.bytes(try Bytes(from: hash))]))
+/// A `Data` list in the ledger's canonical form.
+///
+/// Plutus encodes a `Data` list — and a constructor's fields — as an
+/// *indefinite-length* CBOR array when it is non-empty, and as a definite
+/// empty array otherwise. Building lists the definite way produces a value
+/// that serialises differently from the one the ledger would hand the script,
+/// and that compares unequal to a list decoded from a datum.
+func dataList(_ items: [PlutusData]) -> PlutusData {
+    items.isEmpty ? .array([]) : .indefiniteArray(IndefiniteList(items))
 }
 
-/// `withdrawals: Pairs<Credential, Lovelace>`.
+/// A withdrawal's reward credential, in the ledger's order.
 ///
 /// A reward address is a one-byte header followed by the credential; bit 4 of
-/// the header is set when that credential is a script. The ledger orders these
-/// with script credentials before key credentials.
-private func withdrawalsDataV3(_ withdrawals: Withdrawals?) throws -> PlutusData {
-    guard let withdrawals, !withdrawals.data.isEmpty else { return .map([:]) }
+/// the header is set when that credential is a script. The ledger orders
+/// reward accounts by credential, and its `Credential` places script hashes
+/// *before* key hashes — a redeemer's `reward` index counts through this same
+/// order, so every consumer has to agree on it.
+struct WithdrawalCredential: Sendable {
+    let isScript: Bool
+    let hash: Data
+    let amount: Int64
+}
 
-    var entries: [(isScript: Bool, hash: Data, amount: Int64)] = []
+func orderedWithdrawalCredentials(_ withdrawals: Withdrawals?) -> [WithdrawalCredential] {
+    guard let withdrawals else { return [] }
+    var entries: [WithdrawalCredential] = []
     for (rewardAccount, coin) in withdrawals.data {
         guard let header = rewardAccount.first else { continue }
-        entries.append((
+        entries.append(WithdrawalCredential(
             isScript: (header & 0x10) != 0,
             hash: Data(rewardAccount.dropFirst()),
             amount: Int64(coin)
         ))
     }
-    entries.sort {
-        if $0.isScript != $1.isScript { return $0.isScript }  // scripts sort first
+    return entries.sorted {
+        if $0.isScript != $1.isScript { return $0.isScript }
         return $0.hash.lexicographicallyPrecedes($1.hash)
     }
+}
 
+/// `Credential` — `VerificationKey` is constructor 0, `Script` is 1.
+private func credentialData(hash: Data, isScript: Bool) throws -> PlutusData {
+    .constructor(Constr(tag: isScript ? 1 : 0, fields: [.bytes(try Bytes(from: hash))]))
+}
+
+/// `withdrawals: Pairs<Credential, Lovelace>` for V3.
+private func withdrawalsDataV3(_ withdrawals: Withdrawals?) throws -> PlutusData {
+    let entries = orderedWithdrawalCredentials(withdrawals)
+    guard !entries.isEmpty else { return .map([:]) }
     var map = OrderedDictionary<PlutusData, PlutusData>()
     for entry in entries {
         map[try credentialData(hash: entry.hash, isScript: entry.isScript)] =
@@ -522,6 +580,18 @@ private func redeemersMapV3(transaction: Transaction) throws -> PlutusData {
                 .bytes(try Bytes(from: sortedPolicies[entry.index].payload))
             ]))
             pairs.append((0, purpose, entry.data))
+        case .reward:
+            let entries = orderedWithdrawalCredentials(body.withdrawals)
+            guard entry.index < entries.count else {
+                throw ScriptContextError.unsupportedFeature(
+                    "Reward redeemer index \(entry.index) is out of range for the transaction's withdrawals."
+                )
+            }
+            let credential = entries[entry.index]
+            let purpose = PlutusData.constructor(Constr(tag: 2, fields: [
+                try credentialData(hash: credential.hash, isScript: credential.isScript)
+            ]))
+            pairs.append((2, purpose, entry.data))
         default:
             throw ScriptContextError.unsupportedFeature(
                 "Redeemer purpose \(String(describing: entry.tag)) is not supported in the "
@@ -665,17 +735,37 @@ private func valueData(_ txValue: SwiftCardanoCore.Value) -> PlutusData {
     var map = OrderedDictionary<PlutusData, PlutusData>()
     map[adaKey] = .map(adaInner)
 
-    for (policyId, asset) in txValue.multiAsset.data {
+    for (policyId, asset) in canonicalAssets(txValue.multiAsset) {
         let csKey = PlutusData.bytes(.byteString(ByteString(bytes: policyId.payload)))
-        var tokenMap = OrderedDictionary<PlutusData, PlutusData>()
-        for (assetName, amount) in asset.data {
-            let tnKey = PlutusData.bytes(.byteString(ByteString(bytes: assetName.payload)))
-            tokenMap[tnKey] = .bigInt(.int(Int64(amount)))
-        }
-        map[csKey] = .map(tokenMap)
+        map[csKey] = .map(tokenMap(for: asset))
     }
 
     return .map(map)
+}
+
+/// A multi-asset's policies in canonical order.
+///
+/// `MultiAsset.data` is a Swift `Dictionary`, whose iteration order is
+/// arbitrary and randomised per process. A Plutus `Value` is a map, and the
+/// ledger builds it with its policies and asset names in ascending bytewise
+/// order — a script folding over one, or comparing two, sees a different value
+/// if the order differs.
+private func canonicalAssets(_ multiAsset: MultiAsset) -> [(ScriptHash, SwiftCardanoCore.Asset)] {
+    multiAsset.data
+        .map { ($0.key, $0.value) }
+        .sorted { $0.0.payload.lexicographicallyPrecedes($1.0.payload) }
+}
+
+/// One policy's token map, in canonical asset-name order.
+private func tokenMap(for asset: SwiftCardanoCore.Asset) -> OrderedDictionary<PlutusData, PlutusData> {
+    var tokens = OrderedDictionary<PlutusData, PlutusData>()
+    let sorted = asset.data
+        .map { ($0.key, $0.value) }
+        .sorted { $0.0.payload.lexicographicallyPrecedes($1.0.payload) }
+    for (assetName, amount) in sorted {
+        tokens[.bytes(.byteString(ByteString(bytes: assetName.payload)))] = .bigInt(.int(Int64(amount)))
+    }
+    return tokens
 }
 
 /// Encode a lovelace-only Value (for fee): `Map { b"" => Map { b"" => coin } }`
@@ -692,14 +782,9 @@ private func valueDataFromCoin(_ coin: Int) -> PlutusData {
 /// Encode a `MultiAsset` (the mint field) as a Plutus Value map — no ADA entry.
 private func mintValueData(_ multiAsset: MultiAsset) -> PlutusData {
     var map = OrderedDictionary<PlutusData, PlutusData>()
-    for (policyId, asset) in multiAsset.data {
+    for (policyId, asset) in canonicalAssets(multiAsset) {
         let csKey = PlutusData.bytes(.byteString(ByteString(bytes: policyId.payload)))
-        var tokenMap = OrderedDictionary<PlutusData, PlutusData>()
-        for (assetName, amount) in asset.data {
-            let tnKey = PlutusData.bytes(.byteString(ByteString(bytes: assetName.payload)))
-            tokenMap[tnKey] = .bigInt(.int(Int64(amount)))
-        }
-        map[csKey] = .map(tokenMap)
+        map[csKey] = .map(tokenMap(for: asset))
     }
     return .map(map)
 }
