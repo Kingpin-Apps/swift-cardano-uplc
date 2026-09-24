@@ -88,3 +88,24 @@ A V1 or V2 fixture is worth writing for anything the two hold differently from V
 which is more than it looks: the field count, the fee's shape, the mint's zero-ada
 entry, whether withdrawals and datums are maps or lists of pairs, and the order
 those come in.
+
+### Certificates
+
+`TxInfo` carries every certificate, not only the witnessed one, so `v1-cert-all`
+and `v2-cert-all` pin all five `DCert` constructors in a single transaction: the
+script-witnessed deregistration plus a registration, a stake delegation, a pool
+registration and a pool retirement. Two things the ledger's own output settles:
+a Conway registration *with* a deposit (certificate type 7) still translates to
+plain `DCertDelegRegKey`, dropping the deposit, and a pool registration keeps only
+the operator and VRF hashes.
+
+The twelve Conway certificates that have no `DCert` form cannot be shown to a V1
+or V2 script at all. Putting one — a vote delegation, say — in a transaction
+alongside such a script makes the ledger refuse to build the context:
+
+```
+CertificateNotSupported (ConwayTxCertDeleg (ConwayDelegCert (ScriptHashObj …) (DelegVote …)))
+```
+
+So refusing, as `certificateDataV1V2` does, is the faithful behaviour; there is no
+context to build. `ScriptContextBuilderTests` asserts both halves of that.

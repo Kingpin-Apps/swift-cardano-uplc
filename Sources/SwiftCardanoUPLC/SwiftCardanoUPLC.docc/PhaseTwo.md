@@ -78,9 +78,17 @@ behaviour for that version forever. From version 10 on the deposit is visible.
 ``PhaseTwo/init(protocolParameters:version:)`` takes the version from the
 parameters; ``PhaseTwo/init(costModel:protocolMajorVersion:)`` needs telling.
 
-PlutusV1 and V2 predate Conway and see only the five Shelley certificates. A
-transaction that carries a Conway-only certificate alongside a V1 or V2 script is
-rejected by the ledger, and rejected here too rather than approximated.
+PlutusV1 and V2 predate Conway and see only the five Shelley certificates, as
+`DCert`. Seven Conway certificates reach them, because the deposit-bearing
+registration and deregistration translate to the same `DCert` as the plain ones —
+the deposit is simply dropped, since `DCert` has nowhere to put it. A pool
+registration likewise keeps only the operator and VRF hashes.
+
+The other twelve have no `DCert` form. A transaction carrying one alongside a V1
+or V2 script is rejected by the ledger — `CertificateNotSupported`, verified
+against `cardano-cli` — and rejected here too rather than approximated: a context
+with the certificate quietly missing would let a script approve something it never
+saw. All five constructors are checked against contexts the ledger built itself.
 
 ### Validity intervals
 

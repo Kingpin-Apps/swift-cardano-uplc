@@ -980,4 +980,112 @@ struct CanonicalContextDataTests {
         let tokens = try #require(value.values.dropFirst().first?.mapEntries)
         #expect(tokens.keys.map { $0.bytesData?.first } == [0x0A, 0x7A])
     }
+
+    // MARK: — Certificates as V1 and V2 see them
+
+    /// The five `DCert` constructors those languages have, against the shapes the
+    /// ledger itself produced for the same certificates (fixtures `v1-cert-all`
+    /// and `v2-cert-all`). Conway has nineteen certificates and V1/V2 can express
+    /// seven of them; `registration` and `unregister` lose their deposit on the
+    /// way, because `DCert` has nowhere to put it.
+    @Test("the seven expressible certificates map onto the five DCert constructors")
+    func certificates_v1v2Mapping() throws {
+        let key = StakeCredential(
+            credential: .verificationKeyHash(
+                VerificationKeyHash(payload: Data(repeating: 0x3F, count: VERIFICATION_KEY_HASH_SIZE))
+            )
+        )
+        let pool = PoolKeyHash(payload: Data(repeating: 0xC3, count: POOL_KEY_HASH_SIZE))
+
+        /// Every one of them keys the credential by `StakingHash`, which is
+        /// `Constr 0` around the credential.
+        func expectStakingHash(_ field: PlutusData) throws {
+            #expect(field.constrTag == 0)
+            let credential = try #require(field.constrFields?.first)
+            #expect(credential.constrTag == 0)  // PubKeyCredential
+            #expect(credential.constrFields?.first?.bytesData == key.credential.payload)
+        }
+
+        let registration = try certificateDataV1V2(
+            .stakeRegistration(StakeRegistration(stakeCredential: key))
+        )
+        #expect(registration.constrTag == 0)
+        try expectStakingHash(try #require(registration.constrFields?[0]))
+
+        // A deposit-bearing registration is the same DCert: the deposit is dropped.
+        let withDeposit = try certificateDataV1V2(
+            .register(Register(stakeCredential: key, coin: 2_000_000))
+        )
+        #expect(withDeposit == registration)
+
+        let deregistration = try certificateDataV1V2(
+            .stakeDeregistration(StakeDeregistration(stakeCredential: key))
+        )
+        #expect(deregistration.constrTag == 1)
+        #expect(
+            try certificateDataV1V2(.unregister(Unregister(stakeCredential: key, coin: 2_000_000)))
+                == deregistration
+        )
+
+        let delegation = try certificateDataV1V2(
+            .stakeDelegation(StakeDelegation(stakeCredential: key, poolKeyHash: pool))
+        )
+        #expect(delegation.constrTag == 2)
+        try expectStakingHash(try #require(delegation.constrFields?[0]))
+        #expect(delegation.constrFields?[1].bytesData == pool.payload)
+
+        // A pool registration keeps only the operator and the VRF hash — the
+        // pledge, cost, margin, reward account, owners and relays are all dropped.
+        let vrf = VrfKeyHash(payload: Data(repeating: 0x88, count: VRF_KEY_HASH_SIZE))
+        let poolRegistration = try certificateDataV1V2(
+            .poolRegistration(PoolRegistration(poolParams: PoolParams(
+                poolOperator: pool,
+                vrfKeyHash: vrf,
+                pledge: 1_000_000,
+                cost: 340_000_000,
+                margin: UnitInterval(numerator: 1, denominator: 20),
+                rewardAccount: RewardAccountHash(
+                    payload: Data(repeating: 0xE1, count: REWARD_ACCOUNT_HASH_SIZE)
+                ),
+                poolOwners: .list([]),
+                relays: nil,
+                poolMetadata: nil
+            )))
+        )
+        #expect(poolRegistration.constrTag == 3)
+        #expect(poolRegistration.constrFields?.count == 2)
+        #expect(poolRegistration.constrFields?[0].bytesData == pool.payload)
+        #expect(poolRegistration.constrFields?[1].bytesData == vrf.payload)
+
+        let retirement = try certificateDataV1V2(
+            .poolRetirement(PoolRetirement(poolKeyHash: pool, epoch: 500))
+        )
+        #expect(retirement.constrTag == 4)
+        #expect(retirement.constrFields?[0].bytesData == pool.payload)
+        #expect(retirement.constrFields?[1].intValue == 500)
+    }
+
+    /// A Conway-only certificate has no `DCert` form, and the ledger refuses to
+    /// build the context at all rather than omitting it — `CertificateNotSupported`,
+    /// confirmed against `cardano-cli` for both V1 and V2. Emitting a context with
+    /// the certificate missing would let a script approve a delegation it never saw.
+    @Test("a Conway-only certificate is refused for V1 and V2, as the ledger refuses it")
+    func certificates_conwayOnlyRefused() throws {
+        let key = StakeCredential(
+            credential: .verificationKeyHash(
+                VerificationKeyHash(payload: Data(repeating: 0x7B, count: VERIFICATION_KEY_HASH_SIZE))
+            )
+        )
+        let drep = DRep(
+            credential: .verificationKeyHash(
+                VerificationKeyHash(payload: Data(repeating: 0x88, count: VERIFICATION_KEY_HASH_SIZE))
+            )
+        )
+
+        #expect(throws: ScriptContextError.self) {
+            try certificateDataV1V2(
+                .voteDelegate(VoteDelegate(stakeCredential: key, drep: drep))
+            )
+        }
+    }
 }
