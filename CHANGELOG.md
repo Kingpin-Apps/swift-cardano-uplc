@@ -1,3 +1,10 @@
+## 0.6.1 (2026-09-24)
+
+### Fix
+
+- build PlutusV1 and V2 contexts and validity intervals as the ledger does
+- price PlutusV1 and V2 builtins by the Chang semantics variant
+
 ## 0.6.0 (2026-09-23)
 
 ### Feat
