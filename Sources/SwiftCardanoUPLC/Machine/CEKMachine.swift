@@ -11,35 +11,125 @@ private enum MachineState: Sendable {
 /// CEK (Control, Environment, Continuation) evaluator for UPLC.
 public struct CEKMachine: Sendable {
     private var budget: ExBudget
+    private let initialBudget: ExBudget
     private let costModel: CostModel
-    private var logs: [String]
+    /// Trace log entries emitted so far by `trace` builtins. They stay
+    /// readable after ``run(_:)`` throws, so a failing script's traces are
+    /// not lost.
+    public private(set) var logs: [String]
+    /// The builtin most recently charged, for an observer to report.
+    private var lastBuiltin: (DefaultFunction, ExBudget)?
     /// Number of unbudgeted steps to batch before spending budget.
     private let slippage: Int = 200
     private var unbudgetedSteps: [Int: Int32] = [:]
 
     public init(budget: ExBudget = .restricted, costModel: CostModel) {
         self.budget = budget
+        self.initialBudget = budget
         self.costModel = costModel
         self.logs = []
     }
 
+    /// The budget left, counting machine steps not yet charged in a batch.
+    /// Negative in either dimension once the budget has run out.
+    public var remainingBudget: ExBudget {
+        var remaining = budget
+        for (kind, count) in unbudgetedSteps {
+            let cost = stepCostFor(kind)
+            remaining.cpu -= cost.cpu * Int64(count)
+            remaining.mem -= cost.mem * Int64(count)
+        }
+        return remaining
+    }
+
+    /// The budget spent so far — by a finished run, or by a failed one up to
+    /// the point it failed.
+    public var consumedBudget: ExBudget {
+        let remaining = remainingBudget
+        return ExBudget(cpu: initialBudget.cpu - remaining.cpu, mem: initialBudget.mem - remaining.mem)
+    }
+
     /// Evaluate a NamedDeBruijn program and return the result.
+    ///
+    /// When it throws, ``logs``, ``remainingBudget`` and ``consumedBudget``
+    /// still describe the run up to the failure.
     public mutating func run(_ program: NamedDeBruijnProgram) throws -> EvalResult {
+        var observer = NoCEKObserver()
+        return try run(program, observer: &observer)
+    }
+
+    /// Evaluate a program, reporting every machine step to `observer`.
+    ///
+    /// The observer sees the machine as it runs: each term computed and value
+    /// returned, each builtin with its cost, each trace message, and how the
+    /// run ended. Observing does not change the outcome or the budget.
+    public mutating func run<Observer: CEKObserver>(
+        _ program: NamedDeBruijnProgram,
+        observer: inout Observer
+    ) throws -> EvalResult {
         logs = []
-        try spendBudget(costModel.machineStepCosts.startup)
+        var step = 0
+        var reportedLogs = 0
+        let observing = observer.isObserving
+        func report(_ event: CEKEvent, _ machine: CEKMachine) {
+            observer.observe(CEKStep(index: step, event: event, consumed: machine.consumedBudget))
+        }
 
-        var state = MachineState.compute(.noFrame, Environment(), program.term)
+        do {
+            try spendBudget(costModel.machineStepCosts.startup)
+            var state = MachineState.compute(.noFrame, Environment(), program.term)
 
-        while true {
-            switch state {
-            case .compute(let ctx, let env, let term):
-                state = try computeStep(ctx, env, term)
-            case .returning(let ctx, let value):
-                state = try returnStep(ctx, value)
-            case .done(let term):
-                try spendUnbudgetedSteps()
-                return EvalResult(term: term, remainingBudget: budget, logs: logs)
+            while true {
+                switch state {
+                case .compute(let ctx, let env, let term):
+                    if observing { report(.compute(term), self) }
+                    state = try computeStep(ctx, env, term)
+                case .returning(let ctx, let value):
+                    if observing { report(.returning(value), self) }
+                    state = try returnStep(ctx, value)
+                case .done(let term):
+                    try spendUnbudgetedSteps()
+                    if observing { report(.finished(term), self) }
+                    return EvalResult(term: term, remainingBudget: budget, logs: logs)
+                }
+                if observing {
+                    if let (function, cost) = lastBuiltin {
+                        lastBuiltin = nil
+                        report(.builtin(function, cost: cost), self)
+                    }
+                    while reportedLogs < logs.count {
+                        report(.log(logs[reportedLogs]), self)
+                        reportedLogs += 1
+                    }
+                }
+                step += 1
             }
+        } catch let error as MachineError {
+            if observing {
+                // A builtin that failed may have traced first.
+                while reportedLogs < logs.count {
+                    report(.log(logs[reportedLogs]), self)
+                    reportedLogs += 1
+                }
+                report(.failed(error), self)
+            }
+            throw error
+        }
+    }
+
+    /// Evaluate a program without throwing: the outcome, the traces and the
+    /// budget spent, whether the script succeeded or failed.
+    public mutating func evaluate(_ program: NamedDeBruijnProgram) -> CEKEvaluation {
+        do {
+            let result = try run(program)
+            return CEKEvaluation(outcome: .success(result.term), logs: logs, consumedBudget: consumedBudget, remainingBudget: remainingBudget)
+        } catch let error as MachineError {
+            return CEKEvaluation(outcome: .failure(error), logs: logs, consumedBudget: consumedBudget, remainingBudget: remainingBudget)
+        } catch {
+            return CEKEvaluation(
+                outcome: .failure(.typeError("\(error)")), logs: logs,
+                consumedBudget: consumedBudget, remainingBudget: remainingBudget
+            )
         }
     }
 
@@ -218,12 +308,17 @@ public struct CEKMachine: Sendable {
     }
 
     private mutating func spendUnbudgetedSteps() throws {
-        for (kind, count) in unbudgetedSteps {
-            let stepCost = stepCostFor(kind)
-            try spendBudget(ExBudget(cpu: stepCost.cpu * Int64(count),
-                                     mem: stepCost.mem * Int64(count)))
-        }
+        // Clear the batch before charging it, so a charge that runs out of
+        // budget part way leaves nothing counted twice by `remainingBudget`.
+        let pending = unbudgetedSteps
         unbudgetedSteps.removeAll()
+        var total = ExBudget(cpu: 0, mem: 0)
+        for (kind, count) in pending {
+            let stepCost = stepCostFor(kind)
+            total.cpu += stepCost.cpu * Int64(count)
+            total.mem += stepCost.mem * Int64(count)
+        }
+        try spendBudget(total)
     }
 
     /// Charge a builtin's cost, which depends on the sizes of its arguments.
@@ -241,6 +336,7 @@ public struct CEKMachine: Sendable {
                 + "Plutus version cannot use it."
             )
         }
+        lastBuiltin = (function, cost)
         try spendBudget(cost)
     }
 
