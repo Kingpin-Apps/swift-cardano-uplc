@@ -124,104 +124,153 @@ public struct UPLCParser: Sendable {
 
     // MARK: — Term parser
 
+    /// Parses one term with an explicit frame stack rather than recursion, so
+    /// deeply nested programs cannot overflow the call stack. Tokens are
+    /// consumed, names created, and errors thrown in exactly the order a
+    /// recursive descent would.
     private mutating func parseTerm(_ tokens: inout [String]) throws -> Term<Name> {
-        guard let tok = tokens.first else { throw UPLCParseError.unexpectedEnd }
+        var frames: [ParseFrame] = []
+        while true {
+            var term: Term<Name>
+            parse: do {
+                guard let tok = tokens.first else { throw UPLCParseError.unexpectedEnd }
 
-        if tok == "error" {
-            tokens.removeFirst()
-            return .error
-        }
+                if tok == "error" {
+                    tokens.removeFirst()
+                    term = .error
+                    break parse
+                }
 
-        // Application syntax: [f x ...] — left-associative currying
-        if tok == "[" {
-            tokens.removeFirst() // consume "["
-            var result = try parseTerm(&tokens)
-            while tokens.first != "]" {
-                let arg = try parseTerm(&tokens)
-                result = .apply(function: result, argument: arg)
+                // Application syntax: [f x ...] — left-associative currying
+                if tok == "[" {
+                    tokens.removeFirst() // consume "["
+                    frames.append(.bracket(applied: nil))
+                    continue
+                }
+
+                if tok != "(" {
+                    // Bare identifier — treat as a variable reference
+                    tokens.removeFirst()
+                    term = .var(makeName(tok))
+                    break parse
+                }
+
+                tokens.removeFirst() // consume "("
+                guard let keyword = tokens.first else { throw UPLCParseError.unexpectedEnd }
+
+                switch keyword {
+                case "lam":
+                    tokens.removeFirst()
+                    let paramStr = try next(&tokens)
+                    frames.append(.lambda(parameterName: makeName(paramStr)))
+                    continue
+
+                case "delay":
+                    tokens.removeFirst()
+                    frames.append(.delay)
+                    continue
+
+                case "force":
+                    tokens.removeFirst()
+                    frames.append(.force)
+                    continue
+
+                case "error":
+                    tokens.removeFirst()
+                    try consume(")", in: &tokens)
+                    term = .error
+
+                case "con":
+                    tokens.removeFirst()
+                    let (type_, val) = try parseConstant(&tokens)
+                    _ = type_
+                    try consume(")", in: &tokens)
+                    term = .constant(val)
+
+                case "builtin":
+                    tokens.removeFirst()
+                    let name = try next(&tokens)
+                    guard let fn = builtinByName(name) else {
+                        throw UPLCParseError.unknownBuiltin(name)
+                    }
+                    try consume(")", in: &tokens)
+                    term = .builtin(fn)
+
+                case "constr":
+                    tokens.removeFirst()
+                    let tagStr = try next(&tokens)
+                    guard let tag = UInt64(tagStr) else { throw UPLCParseError.unexpectedToken(tagStr) }
+                    if tokens.first != ")" {
+                        frames.append(.constr(tag: tag, fields: []))
+                        continue
+                    }
+                    try consume(")", in: &tokens)
+                    term = .constr(tag: tag, fields: [])
+
+                case "case":
+                    tokens.removeFirst()
+                    frames.append(.caseArgument)
+                    continue
+
+                default:
+                    // Application: (function argument)
+                    frames.append(.applyFunction)
+                    continue
+                }
             }
-            try consume("]", in: &tokens)
-            return result
-        }
 
-        if tok != "(" {
-            // Bare identifier — treat as a variable reference
-            tokens.removeFirst()
-            return .var(makeName(tok))
-        }
-
-        tokens.removeFirst() // consume "("
-        guard let keyword = tokens.first else { throw UPLCParseError.unexpectedEnd }
-
-        switch keyword {
-        case "lam":
-            tokens.removeFirst()
-            let paramStr = try next(&tokens)
-            let param = makeName(paramStr)
-            let body = try parseTerm(&tokens)
-            try consume(")", in: &tokens)
-            return .lambda(parameterName: param, body: body)
-
-        case "delay":
-            tokens.removeFirst()
-            let body = try parseTerm(&tokens)
-            try consume(")", in: &tokens)
-            return .delay(body)
-
-        case "force":
-            tokens.removeFirst()
-            let body = try parseTerm(&tokens)
-            try consume(")", in: &tokens)
-            return .force(body)
-
-        case "error":
-            tokens.removeFirst()
-            try consume(")", in: &tokens)
-            return .error
-
-        case "con":
-            tokens.removeFirst()
-            let (type_, val) = try parseConstant(&tokens)
-            _ = type_
-            try consume(")", in: &tokens)
-            return .constant(val)
-
-        case "builtin":
-            tokens.removeFirst()
-            let name = try next(&tokens)
-            guard let fn = builtinByName(name) else {
-                throw UPLCParseError.unknownBuiltin(name)
+            // `term` is complete: fold it into its parents until one needs another child.
+            reduce: while true {
+                guard let frame = frames.popLast() else { return term }
+                switch frame {
+                case .bracket(let applied):
+                    let result = applied.map { .apply(function: $0, argument: term) } ?? term
+                    if tokens.first != "]" {
+                        frames.append(.bracket(applied: result))
+                        break reduce
+                    }
+                    try consume("]", in: &tokens)
+                    term = result
+                case .lambda(let param):
+                    try consume(")", in: &tokens)
+                    term = .lambda(parameterName: param, body: term)
+                case .delay:
+                    try consume(")", in: &tokens)
+                    term = .delay(term)
+                case .force:
+                    try consume(")", in: &tokens)
+                    term = .force(term)
+                case .constr(let tag, var fields):
+                    fields.append(term)
+                    if tokens.first != ")" {
+                        frames.append(.constr(tag: tag, fields: fields))
+                        break reduce
+                    }
+                    try consume(")", in: &tokens)
+                    term = .constr(tag: tag, fields: fields)
+                case .caseArgument:
+                    if tokens.first != ")" {
+                        frames.append(.caseBranches(argument: term, branches: []))
+                        break reduce
+                    }
+                    try consume(")", in: &tokens)
+                    term = .case(argument: term, branches: [])
+                case .caseBranches(let argument, var branches):
+                    branches.append(term)
+                    if tokens.first != ")" {
+                        frames.append(.caseBranches(argument: argument, branches: branches))
+                        break reduce
+                    }
+                    try consume(")", in: &tokens)
+                    term = .case(argument: argument, branches: branches)
+                case .applyFunction:
+                    frames.append(.applyArgument(function: term))
+                    break reduce
+                case .applyArgument(let function):
+                    try consume(")", in: &tokens)
+                    term = .apply(function: function, argument: term)
+                }
             }
-            try consume(")", in: &tokens)
-            return .builtin(fn)
-
-        case "constr":
-            tokens.removeFirst()
-            let tagStr = try next(&tokens)
-            guard let tag = UInt64(tagStr) else { throw UPLCParseError.unexpectedToken(tagStr) }
-            var fields = [Term<Name>]()
-            while tokens.first != ")" {
-                fields.append(try parseTerm(&tokens))
-            }
-            try consume(")", in: &tokens)
-            return .constr(tag: tag, fields: fields)
-
-        case "case":
-            tokens.removeFirst()
-            let arg = try parseTerm(&tokens)
-            var branches = [Term<Name>]()
-            while tokens.first != ")" {
-                branches.append(try parseTerm(&tokens))
-            }
-            try consume(")", in: &tokens)
-            return .case(argument: arg, branches: branches)
-
-        default:
-            // Application: (function argument)
-            let f = try parseTerm(&tokens)
-            let arg = try parseTerm(&tokens)
-            try consume(")", in: &tokens)
-            return .apply(function: f, argument: arg)
         }
     }
 
@@ -371,88 +420,136 @@ public struct UPLCParser: Sendable {
     //
     // Formats: I n | B #hex | Constr tag [fields] | List [items] | Map [(k, v), ...]
 
+    /// Parses one PlutusData literal with an explicit frame stack rather than
+    /// recursion, consuming tokens and throwing errors in the same order a
+    /// recursive descent would.
     private mutating func parsePlutusDataLiteral(_ tokens: inout [String]) throws -> PlutusData {
-        guard let tok = tokens.first else { throw UPLCParseError.unexpectedEnd }
+        var frames: [DataFrame] = []
+        while true {
+            var data: PlutusData
+            parse: do {
+                guard let tok = tokens.first else { throw UPLCParseError.unexpectedEnd }
 
-        // Handle optional parenthesized form: (I 42), (B #hex), etc.
-        if tok == "(" {
-            tokens.removeFirst()
-            let result = try parsePlutusDataLiteral(&tokens)
-            try consume(")", in: &tokens)
-            return result
+                // Handle optional parenthesized form: (I 42), (B #hex), etc.
+                if tok == "(" {
+                    tokens.removeFirst()
+                    frames.append(.parenthesized)
+                    continue
+                }
+
+                switch tok {
+                case "I":
+                    tokens.removeFirst()
+                    let valStr = try next(&tokens)
+                    guard let n = BigInt(valStr) else { throw UPLCParseError.invalidInteger(valStr) }
+                    data = .bigInt(BigInteger(bigInt: n))
+
+                case "B":
+                    tokens.removeFirst()
+                    let hex = try next(&tokens)
+                    // B requires a # prefix for hex data
+                    guard hex.hasPrefix("#") else {
+                        throw UPLCParseError.invalidConstant("data B: expected #hex, got \(hex)")
+                    }
+                    let cleaned = String(hex.dropFirst())
+                    data = .bytes(try Bytes(from: Data(try hexToBytes(cleaned))))
+
+                case "Constr":
+                    tokens.removeFirst()
+                    let tagStr = try next(&tokens)
+                    guard let rawTag = UInt64(tagStr) else { throw UPLCParseError.invalidInteger(tagStr) }
+                    // Convert from Plutus display tag to CBOR tag
+                    let cborTag: UInt64
+                    if rawTag <= 6 {
+                        cborTag = 121 + rawTag
+                    } else if rawTag >= 7 && rawTag <= 127 {
+                        cborTag = 1280 + (rawTag - 7)
+                    } else {
+                        cborTag = rawTag
+                    }
+                    // Parse fields: [field1, field2, ...]
+                    try consume("[", in: &tokens)
+                    if try beginItem(&tokens) {
+                        frames.append(.constr(tag: cborTag, fields: []))
+                        continue
+                    }
+                    data = .constructor(Constr(tag: cborTag, fields: []))
+
+                case "List":
+                    tokens.removeFirst()
+                    try consume("[", in: &tokens)
+                    if try beginItem(&tokens) {
+                        frames.append(.list(items: []))
+                        continue
+                    }
+                    data = .array([])
+
+                case "Map":
+                    tokens.removeFirst()
+                    try consume("[", in: &tokens)
+                    if try beginMapEntry(&tokens) {
+                        frames.append(.mapKey(entries: [:]))
+                        continue
+                    }
+                    data = .map([:])
+
+                default:
+                    throw UPLCParseError.invalidConstant("data literal: \(tok)")
+                }
+            }
+
+            // `data` is complete: fold it into its parents until one needs another child.
+            reduce: while true {
+                guard let frame = frames.popLast() else { return data }
+                switch frame {
+                case .parenthesized:
+                    try consume(")", in: &tokens)
+                case .constr(let tag, var fields):
+                    fields.append(data)
+                    if try beginItem(&tokens) {
+                        frames.append(.constr(tag: tag, fields: fields))
+                        break reduce
+                    }
+                    data = .constructor(Constr(tag: tag, fields: fields))
+                case .list(var items):
+                    items.append(data)
+                    if try beginItem(&tokens) {
+                        frames.append(.list(items: items))
+                        break reduce
+                    }
+                    data = .array(items)
+                case .mapKey(let entries):
+                    if tokens.first == "," { tokens.removeFirst() }
+                    frames.append(.mapValue(entries: entries, key: data))
+                    break reduce
+                case .mapValue(var entries, let key):
+                    try consume(")", in: &tokens)
+                    entries[key] = data
+                    if try beginMapEntry(&tokens) {
+                        frames.append(.mapKey(entries: entries))
+                        break reduce
+                    }
+                    data = .map(entries)
+                }
+            }
         }
+    }
 
-        switch tok {
-        case "I":
-            tokens.removeFirst()
-            let valStr = try next(&tokens)
-            guard let n = BigInt(valStr) else { throw UPLCParseError.invalidInteger(valStr) }
-            return .bigInt(BigInteger(bigInt: n))
+    /// Skip separating commas in a `[...]` data list. Returns true when another
+    /// item follows; otherwise consumes the closing `]` and returns false.
+    private func beginItem(_ tokens: inout [String]) throws -> Bool {
+        while tokens.first == "," { tokens.removeFirst() }
+        if tokens.first != "]" { return true }
+        try consume("]", in: &tokens)
+        return false
+    }
 
-        case "B":
-            tokens.removeFirst()
-            let hex = try next(&tokens)
-            // B requires a # prefix for hex data
-            guard hex.hasPrefix("#") else {
-                throw UPLCParseError.invalidConstant("data B: expected #hex, got \(hex)")
-            }
-            let cleaned = String(hex.dropFirst())
-            return .bytes(try Bytes(from: Data(try hexToBytes(cleaned))))
-
-        case "Constr":
-            tokens.removeFirst()
-            let tagStr = try next(&tokens)
-            guard let rawTag = UInt64(tagStr) else { throw UPLCParseError.invalidInteger(tagStr) }
-            // Convert from Plutus display tag to CBOR tag
-            let cborTag: UInt64
-            if rawTag <= 6 {
-                cborTag = 121 + rawTag
-            } else if rawTag >= 7 && rawTag <= 127 {
-                cborTag = 1280 + (rawTag - 7)
-            } else {
-                cborTag = rawTag
-            }
-            // Parse fields: [field1, field2, ...]
-            try consume("[", in: &tokens)
-            var fields = [PlutusData]()
-            while tokens.first != "]" {
-                if tokens.first == "," { tokens.removeFirst(); continue }
-                fields.append(try parsePlutusDataLiteral(&tokens))
-            }
-            try consume("]", in: &tokens)
-            return .constructor(Constr(tag: cborTag, fields: fields))
-
-        case "List":
-            tokens.removeFirst()
-            try consume("[", in: &tokens)
-            var items = [PlutusData]()
-            while tokens.first != "]" {
-                if tokens.first == "," { tokens.removeFirst(); continue }
-                items.append(try parsePlutusDataLiteral(&tokens))
-            }
-            try consume("]", in: &tokens)
-            return .array(items)
-
-        case "Map":
-            tokens.removeFirst()
-            try consume("[", in: &tokens)
-            var dict = OrderedDictionary<PlutusData, PlutusData>()
-            while tokens.first != "]" {
-                if tokens.first == "," { tokens.removeFirst(); continue }
-                // Each entry: (key, value)
-                try consume("(", in: &tokens)
-                let key = try parsePlutusDataLiteral(&tokens)
-                if tokens.first == "," { tokens.removeFirst() }
-                let value = try parsePlutusDataLiteral(&tokens)
-                try consume(")", in: &tokens)
-                dict[key] = value
-            }
-            try consume("]", in: &tokens)
-            return .map(dict)
-
-        default:
-            throw UPLCParseError.invalidConstant("data literal: \(tok)")
-        }
+    /// Like ``beginItem(_:)`` for a `Map [...]`, also consuming the `(` that
+    /// opens the next `(key, value)` entry.
+    private func beginMapEntry(_ tokens: inout [String]) throws -> Bool {
+        guard try beginItem(&tokens) else { return false }
+        try consume("(", in: &tokens)
+        return true
     }
 
     // MARK: — Helpers
@@ -495,6 +592,32 @@ public struct UPLCParser: Sendable {
         }
         return bytes
     }
+}
+
+// MARK: — Parse frames
+
+/// A term whose remaining children are still being parsed.
+private enum ParseFrame {
+    /// `[f x ...]`; `applied` is nil until the first term is parsed.
+    case bracket(applied: Term<Name>?)
+    case lambda(parameterName: Name)
+    case delay
+    case force
+    case constr(tag: UInt64, fields: [Term<Name>])
+    case caseArgument
+    case caseBranches(argument: Term<Name>, branches: [Term<Name>])
+    /// `(f x)`
+    case applyFunction
+    case applyArgument(function: Term<Name>)
+}
+
+/// A PlutusData literal whose remaining children are still being parsed.
+private enum DataFrame {
+    case parenthesized
+    case constr(tag: UInt64, fields: [PlutusData])
+    case list(items: [PlutusData])
+    case mapKey(entries: OrderedDictionary<PlutusData, PlutusData>)
+    case mapValue(entries: OrderedDictionary<PlutusData, PlutusData>, key: PlutusData)
 }
 
 // MARK: — Builtin name → DefaultFunction
