@@ -26,7 +26,7 @@ public struct UPLCParser: Sendable {
 
     /// Parse textual UPLC source into a named program.
     public mutating func parse(_ source: String) throws -> NamedProgram {
-        var tokens = tokenize(source)
+        var tokens = Tokens(tokenize(source))
         return try parseProgram(&tokens)
     }
 
@@ -101,7 +101,7 @@ public struct UPLCParser: Sendable {
 
     // MARK: — Top-level parser
 
-    private mutating func parseProgram(_ tokens: inout [String]) throws -> NamedProgram {
+    private mutating func parseProgram(_ tokens: inout Tokens) throws -> NamedProgram {
         try consume("(", in: &tokens)
         try consumeKeyword("program", in: &tokens)
         let versionStr = try next(&tokens)
@@ -128,7 +128,7 @@ public struct UPLCParser: Sendable {
     /// deeply nested programs cannot overflow the call stack. Tokens are
     /// consumed, names created, and errors thrown in exactly the order a
     /// recursive descent would.
-    private mutating func parseTerm(_ tokens: inout [String]) throws -> Term<Name> {
+    private mutating func parseTerm(_ tokens: inout Tokens) throws -> Term<Name> {
         var frames: [ParseFrame] = []
         while true {
             var term: Term<Name>
@@ -276,7 +276,7 @@ public struct UPLCParser: Sendable {
 
     // MARK: — Constant parser
 
-    private mutating func parseConstant(_ tokens: inout [String]) throws -> (UPLCType, UPLCConstant) {
+    private mutating func parseConstant(_ tokens: inout Tokens) throws -> (UPLCType, UPLCConstant) {
         // Type can be a simple keyword or a parenthesized compound type
         let type = try parseType(&tokens)
         let val = try parseConstantValue(type: type, tokens: &tokens)
@@ -285,7 +285,7 @@ public struct UPLCParser: Sendable {
 
     // MARK: — Type parser
 
-    private func parseType(_ tokens: inout [String]) throws -> UPLCType {
+    private func parseType(_ tokens: inout Tokens) throws -> UPLCType {
         guard let tok = tokens.first else { throw UPLCParseError.unexpectedEnd }
 
         if tok == "(" {
@@ -325,7 +325,7 @@ public struct UPLCParser: Sendable {
 
     // MARK: — Constant value parser (given a known type)
 
-    private mutating func parseConstantValue(type: UPLCType, tokens: inout [String]) throws -> UPLCConstant {
+    private mutating func parseConstantValue(type: UPLCType, tokens: inout Tokens) throws -> UPLCConstant {
         switch type {
         case .integer:
             let valStr = try next(&tokens)
@@ -372,7 +372,7 @@ public struct UPLCParser: Sendable {
                 // Remove trailing comma from token if attached
                 if var tok = tokens.first, tok.hasSuffix(",") {
                     tok.removeLast()
-                    tokens[0] = tok
+                    tokens.replaceFirst(with: tok)
                 }
                 items.append(try parseConstantValue(type: elemType, tokens: &tokens))
             }
@@ -387,7 +387,7 @@ public struct UPLCParser: Sendable {
             if tokens.first == "," { tokens.removeFirst() }
             if var tok = tokens.first, tok.hasSuffix(",") {
                 tok.removeLast()
-                tokens[0] = tok
+                tokens.replaceFirst(with: tok)
             }
             let v2 = try parseConstantValue(type: t2, tokens: &tokens)
             try consume(")", in: &tokens)
@@ -423,7 +423,7 @@ public struct UPLCParser: Sendable {
     /// Parses one PlutusData literal with an explicit frame stack rather than
     /// recursion, consuming tokens and throwing errors in the same order a
     /// recursive descent would.
-    private mutating func parsePlutusDataLiteral(_ tokens: inout [String]) throws -> PlutusData {
+    private mutating func parsePlutusDataLiteral(_ tokens: inout Tokens) throws -> PlutusData {
         var frames: [DataFrame] = []
         while true {
             var data: PlutusData
@@ -537,7 +537,7 @@ public struct UPLCParser: Sendable {
 
     /// Skip separating commas in a `[...]` data list. Returns true when another
     /// item follows; otherwise consumes the closing `]` and returns false.
-    private func beginItem(_ tokens: inout [String]) throws -> Bool {
+    private func beginItem(_ tokens: inout Tokens) throws -> Bool {
         while tokens.first == "," { tokens.removeFirst() }
         if tokens.first != "]" { return true }
         try consume("]", in: &tokens)
@@ -546,7 +546,7 @@ public struct UPLCParser: Sendable {
 
     /// Like ``beginItem(_:)`` for a `Map [...]`, also consuming the `(` that
     /// opens the next `(key, value)` entry.
-    private func beginMapEntry(_ tokens: inout [String]) throws -> Bool {
+    private func beginMapEntry(_ tokens: inout Tokens) throws -> Bool {
         guard try beginItem(&tokens) else { return false }
         try consume("(", in: &tokens)
         return true
@@ -559,19 +559,19 @@ public struct UPLCParser: Sendable {
         return Name(text: text, unique: Unique(uniqueCounter))
     }
 
-    private func next(_ tokens: inout [String]) throws -> String {
+    private func next(_ tokens: inout Tokens) throws -> String {
         guard !tokens.isEmpty else { throw UPLCParseError.unexpectedEnd }
         return tokens.removeFirst()
     }
 
-    private func consume(_ expected: String, in tokens: inout [String]) throws {
+    private func consume(_ expected: String, in tokens: inout Tokens) throws {
         guard tokens.first == expected else {
             throw UPLCParseError.unexpectedToken(tokens.first ?? "<end>")
         }
         tokens.removeFirst()
     }
 
-    private func consumeKeyword(_ kw: String, in tokens: inout [String]) throws {
+    private func consumeKeyword(_ kw: String, in tokens: inout Tokens) throws {
         guard tokens.first == kw else {
             throw UPLCParseError.unexpectedToken(tokens.first ?? "<end>")
         }
@@ -591,6 +591,32 @@ public struct UPLCParser: Sendable {
             idx = next
         }
         return bytes
+    }
+}
+
+// MARK: — Token stream
+
+/// The token list with a read position, so consuming a token is O(1) instead
+/// of shifting the whole array as `Array.removeFirst()` does.
+private struct Tokens {
+    private var storage: [String]
+    private var position = 0
+
+    init(_ tokens: [String]) { storage = tokens }
+
+    var first: String? { position < storage.count ? storage[position] : nil }
+    var isEmpty: Bool { position >= storage.count }
+
+    @discardableResult
+    mutating func removeFirst() -> String {
+        precondition(position < storage.count, "no tokens left")
+        defer { position += 1 }
+        return storage[position]
+    }
+
+    /// Replace the next token in place.
+    mutating func replaceFirst(with token: String) {
+        storage[position] = token
     }
 }
 
