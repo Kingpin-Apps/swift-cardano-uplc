@@ -172,8 +172,6 @@ struct FlatEncodingTests {
     // MARK: — Encode round-trip fixtures (Aiken integ_tests equivalent)
 
     /// Parse jpg.uplc → encode to flat → compare byte-for-byte with jpg.flat.
-    /// jpg.uplc is ~9700 lines; the recursive parser can overflow the default stack,
-    /// so the work runs on a thread with 64 MB of stack space.
     @Test func encodeJpgMatchesFixture() throws {
         guard
             let uplcURL = Bundle.module.url(forResource: "Resources/jpg/jpg", withExtension: "uplc"),
@@ -184,34 +182,11 @@ struct FlatEncodingTests {
         let uplcText = try String(contentsOf: uplcURL, encoding: .utf8)
         let expectedBytes = try Data(contentsOf: flatURL)
 
-        // Run the recursive parse on a thread with a larger stack.
-        enum Result { case success(Data); case failure(Error) }
-        nonisolated(unsafe) var threadResult: Result?
-        let sema = DispatchSemaphore(value: 0)
-
-        let t = Thread {
-            do {
-                var parser = UPLCParser()
-                let named = try parser.parse(uplcText)
-                let db = try DeBruijnConverter().convert(named)
-                let encoded = try FlatEncoder().encode(db)
-                threadResult = .success(encoded)
-            } catch {
-                threadResult = .failure(error)
-            }
-            sema.signal()
-        }
-        t.stackSize = 64 * 1024 * 1024  // 64 MB — enough for deeply-nested programs
-        t.qualityOfService = .userInitiated
-        t.start()
-        sema.wait()
-
-        switch threadResult! {
-        case .success(let encoded):
-            #expect(encoded == expectedBytes, "Encoded jpg bytes do not match jpg.flat fixture")
-        case .failure(let error):
-            Issue.record("jpg encode failed: \(error)")
-        }
+        var parser = UPLCParser()
+        let named = try parser.parse(uplcText)
+        let db = try DeBruijnConverter().convert(named)
+        let encoded = try FlatEncoder().encode(db)
+        #expect(encoded == expectedBytes, "Encoded jpg bytes do not match jpg.flat fixture")
     }
 
     /// Parse fibonacci.uplc → encode to flat → compare byte-for-byte with fibonacci.flat

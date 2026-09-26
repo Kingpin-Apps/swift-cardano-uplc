@@ -76,6 +76,45 @@ struct DeepTermTests {
         #expect(outcome.renamed)
     }
 
+    @Test func parsesDeepProgram() async throws {
+        let matches = try await Task.detached {
+            let chain = DeepChain(depth: Self.depth)
+            let converter = DeBruijnConverter()
+            let version: (UInt, UInt, UInt) = (1, 1, 0)
+            var parser = UPLCParser()
+
+            var named = try parser.parse(chain.source).term
+            var deBruijn = try converter.convert(NamedProgram(version: version, term: named)).term
+            dismantle(&named)
+            var renamed = try converter.convertToNamed(DeBruijnProgram(version: version, term: deBruijn)).term
+            dismantle(&deBruijn)
+            let printed = PrettyPrinter().printCompact(renamed)
+            dismantle(&renamed)
+            return printed == chain.expectedCompact
+        }.value
+        #expect(matches)
+    }
+
+    @Test func parsesDeepDataLiteral() async throws {
+        let matches = try await Task.detached {
+            var prefix = [String](), suffix = [String]()
+            for level in 0..<Self.depth {
+                prefix.append(level.isMultiple(of: 2) ? "List [" : "Constr 1 [")
+                suffix.append(level.isMultiple(of: 2) ? ", B #ab]" : "]")
+            }
+            let literal = prefix.reversed().joined() + "I 7" + suffix.joined()
+
+            var parser = UPLCParser()
+            var term = try parser.parse("(program 1.1.0 (con data (\(literal))))").term
+            guard case .constant(.data(var data)) = term else { return false }
+            term = .error
+            let printed = PrettyPrinter().printPlutusData(data)
+            dismantle(&data)
+            return printed == literal
+        }.value
+        #expect(matches)
+    }
+
     @Test func printsDeepPlutusData() async throws {
         let matches = await Task.detached {
             var data = PlutusData.bigInt(.int(7))
@@ -109,21 +148,41 @@ private struct DeepChain {
     /// The compact rendering, built independently of the printer: each level
     /// wraps the one inside it in a fixed prefix and suffix.
     var expectedCompact: String {
+        wrap("i_1", in: Self.compactShapes)
+    }
+
+    /// The same term as UPLC source, with `x` for every variable. It writes
+    /// one application in the `(f x)` form and the other in the `[f x]` form.
+    var source: String {
+        "(program 1.1.0 \(wrap("x", in: Self.sourceShapes)))"
+    }
+
+    private func wrap(_ leaf: String, in shapes: [(String, String)]) -> String {
         var prefix = [String](), suffix = [String]()
         for level in 0..<depth {
-            let (open, close) = Self.shapes[level % Self.shapes.count]
+            let (open, close) = shapes[level % shapes.count]
             prefix.append(open)
             suffix.append(close)
         }
-        return prefix.reversed().joined() + "i_1" + suffix.joined()
+        return prefix.reversed().joined() + leaf + suffix.joined()
     }
 
-    private static let shapes: [(String, String)] = [
+    private static let compactShapes: [(String, String)] = [
         ("(lam i_0 ", ")"),
         ("(delay ", ")"),
         ("[ ", " (error) ]"),
         ("(force ", ")"),
         ("[ (builtin addInteger) ", " ]"),
+        ("(constr 3 ", " (error))"),
+        ("(case ", " (error) (con integer 1))"),
+    ]
+
+    private static let sourceShapes: [(String, String)] = [
+        ("(lam x ", ")"),
+        ("(delay ", ")"),
+        ("(", " (error))"),
+        ("(force ", ")"),
+        ("[(builtin addInteger) ", "]"),
         ("(constr 3 ", " (error))"),
         ("(case ", " (error) (con integer 1))"),
     ]
@@ -144,7 +203,7 @@ private struct DeepChain {
     private func build<T>(leaf: Term<T>, binder: T) -> Term<T> {
         var term = leaf
         for level in 0..<depth {
-            switch level % Self.shapes.count {
+            switch level % Self.compactShapes.count {
             case 0: term = .lambda(parameterName: binder, body: term)
             case 1: term = .delay(term)
             case 2: term = .apply(function: term, argument: .error)
