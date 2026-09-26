@@ -1,3 +1,16 @@
+## 0.7.1 (2026-09-26)
+
+### Fix
+
+- **parser**: parse terms and data literals without recursion
+- **debruijn**: convert terms without recursion
+- **flat**: encode and decode terms without recursion
+- **pretty**: print terms without recursion
+
+### Perf
+
+- **parser**: consume tokens by index
+
 ## 0.7.0 (2026-09-26)
 
 ### Feat
