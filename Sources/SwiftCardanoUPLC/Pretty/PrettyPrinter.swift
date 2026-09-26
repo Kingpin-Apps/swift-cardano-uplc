@@ -32,93 +32,129 @@ public struct PrettyPrinter: Sendable {
 
     /// Print a NamedDeBruijn term on a single line.
     public func printCompact(_ term: Term<NamedDeBruijn>) -> String {
-        switch term {
-        case .var(let ndb):
-            return "\(ndb.text)_\(ndb.index.index)"
-        case .delay(let body):
-            return "(delay \(printCompact(body)))"
-        case .lambda(let param, let body):
-            return "(lam \(param.text)_\(param.index.index) \(printCompact(body)))"
-        case .apply(let f, let arg):
-            return "[ \(printCompact(f)) \(printCompact(arg)) ]"
-        case .constant(let c):
-            return "(con \(printConstant(c)))"
-        case .force(let body):
-            return "(force \(printCompact(body)))"
-        case .error:
-            return "(error)"
-        case .builtin(let fn):
-            return "(builtin \(builtinName(fn)))"
-        case .constr(let tag, let fields):
-            if fields.isEmpty {
-                return "(constr \(tag))"
+        var out = ""
+        var work: [PrintItem<NamedDeBruijn>] = [.term(term, indent: 0)]
+        while let item = work.popLast() {
+            switch item {
+            case .text(let text):
+                out += text
+            case .term(let term, _):
+                switch term {
+                case .var(let ndb):
+                    out += "\(ndb.text)_\(ndb.index.index)"
+                case .delay(let body):
+                    out += "(delay "
+                    work.append(.text(")"))
+                    work.append(.term(body, indent: 0))
+                case .lambda(let param, let body):
+                    out += "(lam \(param.text)_\(param.index.index) "
+                    work.append(.text(")"))
+                    work.append(.term(body, indent: 0))
+                case .apply(let f, let arg):
+                    out += "[ "
+                    work.append(.text(" ]"))
+                    work.append(.term(arg, indent: 0))
+                    work.append(.text(" "))
+                    work.append(.term(f, indent: 0))
+                case .constant(let c):
+                    out += "(con \(printConstant(c)))"
+                case .force(let body):
+                    out += "(force "
+                    work.append(.text(")"))
+                    work.append(.term(body, indent: 0))
+                case .error:
+                    out += "(error)"
+                case .builtin(let fn):
+                    out += "(builtin \(builtinName(fn)))"
+                case .constr(let tag, let fields):
+                    if fields.isEmpty {
+                        out += "(constr \(tag))"
+                    } else {
+                        out += "(constr \(tag) "
+                        work.append(.text(")"))
+                        work.appendSeparated(fields, separator: " ", indent: 0)
+                    }
+                case .case(let arg, let branches):
+                    out += "(case "
+                    work.append(.text(")"))
+                    work.appendSeparated(branches, separator: " ", indent: 0)
+                    work.append(.text(" "))
+                    work.append(.term(arg, indent: 0))
+                }
             }
-            let fieldStrs = fields.map { printCompact($0) }.joined(separator: " ")
-            return "(constr \(tag) \(fieldStrs))"
-        case .case(let arg, let branches):
-            let branchStrs = branches.map { printCompact($0) }.joined(separator: " ")
-            return "(case \(printCompact(arg)) \(branchStrs))"
         }
+        return out
     }
 
     // MARK: — Named terms
 
     public func printTerm(_ term: Term<Name>, indent: Int = 0) -> String {
-        let pad = String(repeating: " ", count: indent * indentWidth)
-        switch term {
-        case .var(let name):
-            return "\(pad)\(name.text)"
-        case .delay(let body):
-            return "\(pad)(delay\n\(printTerm(body, indent: indent + 1))\n\(pad))"
-        case .lambda(let param, let body):
-            return "\(pad)(lam \(param.text)\n\(printTerm(body, indent: indent + 1))\n\(pad))"
-        case .apply(let f, let arg):
-            return "\(pad)[\n\(printTerm(f, indent: indent + 1))\n\(printTerm(arg, indent: indent + 1))\n\(pad)]"
-        case .constant(let c):
-            return "\(pad)(con \(printConstant(c)))"
-        case .force(let body):
-            return "\(pad)(force\n\(printTerm(body, indent: indent + 1))\n\(pad))"
-        case .error:
-            return "\(pad)error"
-        case .builtin(let fn):
-            return "\(pad)(builtin \(builtinName(fn)))"
-        case .constr(let tag, let fields):
-            let fieldStrs = fields.map { printTerm($0, indent: indent + 1) }.joined(separator: "\n")
-            return "\(pad)(constr \(tag)\n\(fieldStrs)\n\(pad))"
-        case .case(let arg, let branches):
-            let branchStrs = branches.map { printTerm($0, indent: indent + 1) }.joined(separator: "\n")
-            return "\(pad)(case\n\(printTerm(arg, indent: indent + 1))\n\(branchStrs)\n\(pad))"
-        }
+        printIndented(term, indent: indent) { $0.text }
     }
 
     // MARK: — NamedDeBruijn terms
 
     public func printNamedDeBruijn(_ term: Term<NamedDeBruijn>, indent: Int = 0) -> String {
-        let pad = String(repeating: " ", count: indent * indentWidth)
-        switch term {
-        case .var(let ndb):
-            return "\(pad)\(ndb.text)_\(ndb.index.index)"
-        case .delay(let body):
-            return "\(pad)(delay\n\(printNamedDeBruijn(body, indent: indent + 1))\n\(pad))"
-        case .lambda(let param, let body):
-            return "\(pad)(lam \(param.text)_\(param.index.index)\n\(printNamedDeBruijn(body, indent: indent + 1))\n\(pad))"
-        case .apply(let f, let arg):
-            return "\(pad)[\n\(printNamedDeBruijn(f, indent: indent + 1))\n\(printNamedDeBruijn(arg, indent: indent + 1))\n\(pad)]"
-        case .constant(let c):
-            return "\(pad)(con \(printConstant(c)))"
-        case .force(let body):
-            return "\(pad)(force\n\(printNamedDeBruijn(body, indent: indent + 1))\n\(pad))"
-        case .error:
-            return "\(pad)error"
-        case .builtin(let fn):
-            return "\(pad)(builtin \(builtinName(fn)))"
-        case .constr(let tag, let fields):
-            let fieldStrs = fields.map { printNamedDeBruijn($0, indent: indent + 1) }.joined(separator: "\n")
-            return "\(pad)(constr \(tag)\n\(fieldStrs)\n\(pad))"
-        case .case(let arg, let branches):
-            let branchStrs = branches.map { printNamedDeBruijn($0, indent: indent + 1) }.joined(separator: "\n")
-            return "\(pad)(case\n\(printNamedDeBruijn(arg, indent: indent + 1))\n\(branchStrs)\n\(pad))"
+        printIndented(term, indent: indent) { "\($0.text)_\($0.index.index)" }
+    }
+
+    /// Multi-line printer shared by both binder types. Walks the term with an
+    /// explicit work stack so deeply nested programs cannot overflow the call
+    /// stack (Swift-concurrency threads have small stacks).
+    private func printIndented<T>(
+        _ term: Term<T>,
+        indent: Int,
+        name: (T) -> String
+    ) -> String {
+        var out = ""
+        var work: [PrintItem<T>] = [.term(term, indent: indent)]
+        while let item = work.popLast() {
+            switch item {
+            case .text(let text):
+                out += text
+            case .term(let term, let indent):
+                let pad = String(repeating: " ", count: indent * indentWidth)
+                switch term {
+                case .var(let v):
+                    out += "\(pad)\(name(v))"
+                case .delay(let body):
+                    out += "\(pad)(delay\n"
+                    work.append(.text("\n\(pad))"))
+                    work.append(.term(body, indent: indent + 1))
+                case .lambda(let param, let body):
+                    out += "\(pad)(lam \(name(param))\n"
+                    work.append(.text("\n\(pad))"))
+                    work.append(.term(body, indent: indent + 1))
+                case .apply(let f, let arg):
+                    out += "\(pad)[\n"
+                    work.append(.text("\n\(pad)]"))
+                    work.append(.term(arg, indent: indent + 1))
+                    work.append(.text("\n"))
+                    work.append(.term(f, indent: indent + 1))
+                case .constant(let c):
+                    out += "\(pad)(con \(printConstant(c)))"
+                case .force(let body):
+                    out += "\(pad)(force\n"
+                    work.append(.text("\n\(pad))"))
+                    work.append(.term(body, indent: indent + 1))
+                case .error:
+                    out += "\(pad)error"
+                case .builtin(let fn):
+                    out += "\(pad)(builtin \(builtinName(fn)))"
+                case .constr(let tag, let fields):
+                    out += "\(pad)(constr \(tag)\n"
+                    work.append(.text("\n\(pad))"))
+                    work.appendSeparated(fields, separator: "\n", indent: indent + 1)
+                case .case(let arg, let branches):
+                    out += "\(pad)(case\n"
+                    work.append(.text("\n\(pad))"))
+                    work.appendSeparated(branches, separator: "\n", indent: indent + 1)
+                    work.append(.text("\n"))
+                    work.append(.term(arg, indent: indent + 1))
+                }
+            }
         }
+        return out
     }
 
     // MARK: — Constants
@@ -148,35 +184,56 @@ public struct PrettyPrinter: Sendable {
     // MARK: — PlutusData pretty-printing
 
     public func printPlutusData(_ pd: PlutusData) -> String {
-        switch pd {
-        case .constructor(let c):
-            let tag = c.tag ?? 0
-            // Convert CBOR tag back to Plutus display tag
-            let displayTag: UInt64
-            if tag >= 121 && tag <= 127 {
-                displayTag = tag - 121
-            } else if tag >= 1280 && tag <= 1400 {
-                displayTag = (tag - 1280) + 7
-            } else {
-                displayTag = tag
+        var out = ""
+        var work: [DataItem] = [.data(pd)]
+        while let item = work.popLast() {
+            switch item {
+            case .text(let text):
+                out += text
+            case .data(let pd):
+                switch pd {
+                case .constructor(let c):
+                    let tag = c.tag ?? 0
+                    // Convert CBOR tag back to Plutus display tag
+                    let displayTag: UInt64
+                    if tag >= 121 && tag <= 127 {
+                        displayTag = tag - 121
+                    } else if tag >= 1280 && tag <= 1400 {
+                        displayTag = (tag - 1280) + 7
+                    } else {
+                        displayTag = tag
+                    }
+                    out += "Constr \(displayTag) ["
+                    work.append(.text("]"))
+                    work.appendSeparated(c.fields)
+                case .map(let m):
+                    out += "Map ["
+                    work.append(.text("]"))
+                    // Push entries in reverse so they pop in dictionary order.
+                    for (i, entry) in m.reversed().enumerated() {
+                        if i > 0 { work.append(.text(", ")) }
+                        work.append(.text(")"))
+                        work.append(.data(entry.value))
+                        work.append(.text(", "))
+                        work.append(.data(entry.key))
+                        work.append(.text("("))
+                    }
+                case .array(let a):
+                    out += "List ["
+                    work.append(.text("]"))
+                    work.appendSeparated(a)
+                case .indefiniteArray(let a):
+                    out += "List ["
+                    work.append(.text("]"))
+                    work.appendSeparated(a.map { $0 })
+                case .bigInt(let n):
+                    out += "I \(n.toBigInt())"
+                case .bytes(let b):
+                    out += "B #\(b.data.map { String(format: "%02x", $0) }.joined())"
+                }
             }
-            let fields = c.fields.map { printPlutusData($0) }.joined(separator: ", ")
-            return "Constr \(displayTag) [\(fields)]"
-        case .map(let m):
-            let entries = m.map { "(\(printPlutusData($0.key)), \(printPlutusData($0.value)))" }
-                .joined(separator: ", ")
-            return "Map [\(entries)]"
-        case .array(let a):
-            let items = a.map { printPlutusData($0) }.joined(separator: ", ")
-            return "List [\(items)]"
-        case .indefiniteArray(let a):
-            let items = a.map { printPlutusData($0) }.joined(separator: ", ")
-            return "List [\(items)]"
-        case .bigInt(let n):
-            return "I \(n.toBigInt())"
-        case .bytes(let b):
-            return "B #\(b.data.map { String(format: "%02x", $0) }.joined())"
         }
+        return out
     }
 
     /// Print just the value portion of a constant (no type prefix) — used inside lists/pairs.
@@ -215,6 +272,41 @@ public struct PrettyPrinter: Sendable {
         case .bls12_381G1Element: return "bls12_381_G1_element"
         case .bls12_381G2Element: return "bls12_381_G2_element"
         case .bls12_381MlResult:  return "bls12_381_mlresult"
+        }
+    }
+}
+
+// MARK: — Work stacks
+
+/// A pending unit of printer output: either literal text or a term still to print.
+private enum PrintItem<T: Sendable & Hashable> {
+    case text(String)
+    case term(Term<T>, indent: Int)
+}
+
+private extension Array {
+    /// Push `terms` so they pop (and print) in order, with `separator` between them.
+    mutating func appendSeparated<T>(_ terms: [Term<T>], separator: String, indent: Int)
+    where Element == PrintItem<T> {
+        for (i, term) in terms.reversed().enumerated() {
+            if i > 0 { append(.text(separator)) }
+            append(.term(term, indent: indent))
+        }
+    }
+}
+
+/// A pending unit of PlutusData output.
+private enum DataItem {
+    case text(String)
+    case data(PlutusData)
+}
+
+private extension Array where Element == DataItem {
+    /// Push `items` so they pop (and print) in order, separated by `", "`.
+    mutating func appendSeparated(_ items: [PlutusData]) {
+        for (i, item) in items.reversed().enumerated() {
+            if i > 0 { append(.text(", ")) }
+            append(.data(item))
         }
     }
 }
