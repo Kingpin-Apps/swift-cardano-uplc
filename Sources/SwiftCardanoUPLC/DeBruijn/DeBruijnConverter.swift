@@ -17,36 +17,21 @@ public struct DeBruijnConverter: Sendable {
     }
 
     private func convertTerm(_ term: Term<Name>, scope: [String]) throws -> Term<DeBruijn> {
-        switch term {
-        case .var(let name):
-            guard let idx = scope.lastIndex(of: name.text) else {
-                throw DeBruijnError.freeVariable(name.text)
-            }
-            // De Bruijn index 1 = nearest enclosing lambda
-            let distance = UInt(scope.count - idx)
-            return .var(DeBruijn(distance))
-        case .delay(let body):
-            return .delay(try convertTerm(body, scope: scope))
-        case .lambda(let param, let body):
-            let newScope = scope + [param.text]
-            return .lambda(parameterName: DeBruijn(0), body: try convertTerm(body, scope: newScope))
-        case .apply(let f, let arg):
-            return .apply(function: try convertTerm(f, scope: scope),
-                          argument: try convertTerm(arg, scope: scope))
-        case .constant(let c):
-            return .constant(c)
-        case .force(let body):
-            return .force(try convertTerm(body, scope: scope))
-        case .error:
-            return .error
-        case .builtin(let fn):
-            return .builtin(fn)
-        case .constr(let tag, let fields):
-            return .constr(tag: tag, fields: try fields.map { try convertTerm($0, scope: scope) })
-        case .case(let arg, let branches):
-            return .case(argument: try convertTerm(arg, scope: scope),
-                         branches: try branches.map { try convertTerm($0, scope: scope) })
-        }
+        var scope = scope
+        return try mapTerm(
+            term,
+            binder: DeBruijn(0),
+            variable: { name in
+                guard let idx = scope.lastIndex(of: name.text) else {
+                    throw DeBruijnError.freeVariable(name.text)
+                }
+                // De Bruijn index 1 = nearest enclosing lambda
+                let distance = UInt(scope.count - idx)
+                return DeBruijn(distance)
+            },
+            enterLambda: { scope.append($0.text) },
+            exitLambda: { scope.removeLast() }
+        )
     }
 
     // MARK: — NamedDeBruijn → DeBruijn
@@ -58,52 +43,138 @@ public struct DeBruijnConverter: Sendable {
     }
 
     private func stripNames(_ term: Term<NamedDeBruijn>) -> Term<DeBruijn> {
-        switch term {
-        case .var(let ndb):      return .var(ndb.index)
-        case .delay(let body):   return .delay(stripNames(body))
-        case .lambda(_, let body): return .lambda(parameterName: DeBruijn(0), body: stripNames(body))
-        case .apply(let f, let a): return .apply(function: stripNames(f), argument: stripNames(a))
-        case .constant(let c):   return .constant(c)
-        case .force(let body):   return .force(stripNames(body))
-        case .error:             return .error
-        case .builtin(let fn):   return .builtin(fn)
-        case .constr(let t, let fs): return .constr(tag: t, fields: fs.map(stripNames))
-        case .case(let a, let bs):   return .case(argument: stripNames(a), branches: bs.map(stripNames))
-        }
+        mapTerm(term, binder: DeBruijn(0), variable: { $0.index })
     }
 
     // MARK: — DeBruijn → NamedDeBruijn
 
     /// Restore synthetic names to a De Bruijn program for evaluation.
     public func convertToNamed(_ program: DeBruijnProgram) throws -> NamedDeBruijnProgram {
-        let term = addNames(program.term, depth: 0)
+        let term = addNames(program.term)
         return NamedDeBruijnProgram(version: program.version, term: term)
     }
 
-    private func addNames(_ term: Term<DeBruijn>, depth: UInt) -> Term<NamedDeBruijn> {
-        switch term {
-        case .var(let idx):
-            return .var(NamedDeBruijn(text: "i", index: idx))
+    private func addNames(_ term: Term<DeBruijn>) -> Term<NamedDeBruijn> {
+        // Plutus convention: lambda binders always get index 0
+        mapTerm(
+            term,
+            binder: NamedDeBruijn(text: "i", index: DeBruijn(0)),
+            variable: { NamedDeBruijn(text: "i", index: $0) }
+        )
+    }
+}
+
+// MARK: — Iterative term rebuilding
+
+/// A term whose remaining children are still being converted.
+private enum MapFrame<A: Sendable & Hashable, B: Sendable & Hashable> {
+    case delay
+    case force
+    case lambda
+    case applyFunction(argument: Term<A>)
+    case applyArgument(function: Term<B>)
+    case constr(tag: UInt64, done: [Term<B>], rest: ArraySlice<Term<A>>)
+    case caseArgument(branches: [Term<A>])
+    case caseBranches(argument: Term<B>, done: [Term<B>], rest: ArraySlice<Term<A>>)
+}
+
+/// Rebuild `term` with every variable mapped by `variable` and every lambda
+/// binder replaced by `binder`. Children are visited left to right in pre-order
+/// (the same order as a recursive walk), with `enterLambda`/`exitLambda`
+/// bracketing each lambda body. Uses an explicit frame stack so deeply nested
+/// programs cannot overflow the call stack.
+private func mapTerm<A, B>(
+    _ term: Term<A>,
+    binder: B,
+    variable: (A) throws -> B,
+    enterLambda: (A) -> Void = { _ in },
+    exitLambda: () -> Void = {}
+) rethrows -> Term<B> {
+    var frames: [MapFrame<A, B>] = []
+    var current = term
+    while true {
+        var mapped: Term<B>
+        switch current {
+        case .var(let v):
+            mapped = .var(try variable(v))
         case .delay(let body):
-            return .delay(addNames(body, depth: depth))
-        case .lambda(_, let body):
-            // Plutus convention: lambda binders always get index 0
-            let binder = NamedDeBruijn(text: "i", index: DeBruijn(0))
-            return .lambda(parameterName: binder, body: addNames(body, depth: depth + 1))
-        case .apply(let f, let a):
-            return .apply(function: addNames(f, depth: depth), argument: addNames(a, depth: depth))
+            frames.append(.delay)
+            current = body
+            continue
+        case .lambda(let param, let body):
+            enterLambda(param)
+            frames.append(.lambda)
+            current = body
+            continue
+        case .apply(let f, let arg):
+            frames.append(.applyFunction(argument: arg))
+            current = f
+            continue
         case .constant(let c):
-            return .constant(c)
+            mapped = .constant(c)
         case .force(let body):
-            return .force(addNames(body, depth: depth))
+            frames.append(.force)
+            current = body
+            continue
         case .error:
-            return .error
+            mapped = .error
         case .builtin(let fn):
-            return .builtin(fn)
-        case .constr(let t, let fs):
-            return .constr(tag: t, fields: fs.map { addNames($0, depth: depth) })
-        case .case(let a, let bs):
-            return .case(argument: addNames(a, depth: depth), branches: bs.map { addNames($0, depth: depth) })
+            mapped = .builtin(fn)
+        case .constr(let tag, let fields):
+            guard let first = fields.first else {
+                mapped = .constr(tag: tag, fields: [])
+                break
+            }
+            frames.append(.constr(tag: tag, done: [], rest: fields.dropFirst()))
+            current = first
+            continue
+        case .case(let arg, let branches):
+            frames.append(.caseArgument(branches: branches))
+            current = arg
+            continue
+        }
+
+        // `mapped` is complete: fold it into its parents until one needs another child.
+        reduce: while true {
+            guard let frame = frames.popLast() else { return mapped }
+            switch frame {
+            case .delay:
+                mapped = .delay(mapped)
+            case .force:
+                mapped = .force(mapped)
+            case .lambda:
+                exitLambda()
+                mapped = .lambda(parameterName: binder, body: mapped)
+            case .applyFunction(let argument):
+                frames.append(.applyArgument(function: mapped))
+                current = argument
+                break reduce
+            case .applyArgument(let function):
+                mapped = .apply(function: function, argument: mapped)
+            case .constr(let tag, var done, let rest):
+                done.append(mapped)
+                if let next = rest.first {
+                    frames.append(.constr(tag: tag, done: done, rest: rest.dropFirst()))
+                    current = next
+                    break reduce
+                }
+                mapped = .constr(tag: tag, fields: done)
+            case .caseArgument(let branches):
+                if let first = branches.first {
+                    frames.append(.caseBranches(argument: mapped, done: [], rest: branches.dropFirst()))
+                    current = first
+                    break reduce
+                }
+                mapped = .case(argument: mapped, branches: [])
+            case .caseBranches(let argument, var done, let rest):
+                done.append(mapped)
+                if let next = rest.first {
+                    frames.append(.caseBranches(argument: argument, done: done, rest: rest.dropFirst()))
+                    current = next
+                    break reduce
+                }
+                mapped = .case(argument: argument, branches: done)
+            }
         }
     }
 }
