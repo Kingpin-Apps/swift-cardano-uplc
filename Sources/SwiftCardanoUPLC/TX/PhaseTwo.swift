@@ -14,6 +14,11 @@ public struct RedeemerResult: Sendable {
     public let index: Int
     public let passed: Bool
     public let remainingBudget: ExBudget
+    /// The budget the script spent — up to the failure, when it failed.
+    /// `nil` when the script never ran, because it could not be found or
+    /// prepared.
+    public let consumedBudget: ExBudget?
+    /// Trace messages the script emitted, up to the failure when it failed.
     public let logs: [String]
     public let error: MachineError?
     /// Whether `remainingBudget` reflects a real cost model.
@@ -29,11 +34,13 @@ public struct RedeemerResult: Sendable {
         remainingBudget: ExBudget,
         logs: [String],
         error: MachineError?,
-        budgetMeasured: Bool = false
+        budgetMeasured: Bool = false,
+        consumedBudget: ExBudget? = nil
     ) {
         self.index = index
         self.passed = passed
         self.remainingBudget = remainingBudget
+        self.consumedBudget = consumedBudget
         self.logs = logs
         self.error = error
         self.budgetMeasured = budgetMeasured
@@ -117,26 +124,7 @@ public struct PhaseTwo: @unchecked Sendable {
         let costModels = self.costModels
         let protocolMajorVersion = self.protocolMajorVersion
         let slotTimeline = self.slotTimeline
-        let redeemers: [Redeemer]
-        if let rs = transaction.transactionWitnessSet.redeemers {
-            switch rs {
-            case .list(let list):
-                redeemers = list.compactMap { $0 as? Redeemer }
-            case .map(let map):
-                // The tag and index live in the RedeemerKey — dropping them
-                // leaves findScript with nothing to look the script up by.
-                redeemers = map.dictionary.map { key, value in
-                    Redeemer(
-                        tag: key.tag,
-                        index: key.index,
-                        data: value.data,
-                        exUnits: value.exUnits
-                    )
-                }
-            }
-        } else {
-            redeemers = []
-        }
+        let redeemers = Self.redeemers(of: transaction)
 
         // Check upfront if any spending inputs are missing (e.g., already spent on-chain).
         let sortedInputs = transaction.transactionBody.inputs.asArray.sorted {
@@ -205,6 +193,100 @@ public struct PhaseTwo: @unchecked Sendable {
     }
 }
 
+// MARK: — Preparing a script
+
+/// A redeemer's script, found, decoded and applied to its arguments, ready
+/// for a ``CEKMachine`` — to run it with an observer, or to run it again
+/// with a changed redeemer or datum.
+public struct PreparedScript: Sendable {
+    public let redeemer: Redeemer
+    public let version: PlutusVersion
+    /// The script as written, before its arguments are applied.
+    public let program: NamedDeBruijnProgram
+    /// The script context passed to it.
+    public let scriptContext: PlutusData
+    /// The script applied to its datum (spending scripts before V3), its
+    /// redeemer and its context.
+    public let applied: NamedDeBruijnProgram
+    /// The cost model for the script's language version.
+    public let costModel: CostModel
+
+    /// Whether a run's budget is meaningful: false when the cost model is
+    /// a placeholder, in which case the script runs unmetered.
+    public var budgetMeasured: Bool { !costModel.isApproximate }
+
+    /// A machine to run ``applied`` on: with the ledger's per-transaction
+    /// limit when the cost model is real, unmetered when it is a placeholder.
+    public func machine() -> CEKMachine {
+        CEKMachine(budget: budgetMeasured ? .restricted : .unlimited, costModel: costModel)
+    }
+}
+
+extension PhaseTwo {
+    /// The redeemers of `transaction`, in the order they were written.
+    public static func redeemers(of transaction: Transaction) -> [Redeemer] {
+        guard let redeemers = transaction.transactionWitnessSet.redeemers else { return [] }
+        switch redeemers {
+        case .list(let list):
+            return list.compactMap { $0 as? Redeemer }
+        case .map(let map):
+            // The tag and index live in the RedeemerKey — dropping them
+            // leaves findScript with nothing to look the script up by.
+            return map.dictionary.map { key, value in
+                Redeemer(tag: key.tag, index: key.index, data: value.data, exUnits: value.exUnits)
+            }
+        }
+    }
+
+    /// Finds, decodes and applies the script `redeemer` runs.
+    public func prepareScript(
+        for redeemer: Redeemer,
+        transaction: Transaction,
+        resolvedInputs: [UTxO]
+    ) throws -> PreparedScript {
+        try prepareSingleScript(
+            redeemer: redeemer, transaction: transaction, resolvedInputs: resolvedInputs,
+            costModels: costModels, protocolMajorVersion: protocolMajorVersion,
+            slotTimeline: slotTimeline
+        )
+    }
+}
+
+private func prepareSingleScript(
+    redeemer: Redeemer,
+    transaction: Transaction,
+    resolvedInputs: [UTxO],
+    costModels: [PlutusVersion: CostModel],
+    protocolMajorVersion: Int,
+    slotTimeline: SlotTimeline?
+) throws -> PreparedScript {
+    let (scriptData, version) = try findScript(
+        for: redeemer, in: transaction, resolvedInputs: resolvedInputs
+    )
+    let flatBytes = try extractFlatBytes(from: scriptData)
+    let program = try FlatDecoder().decode(flatBytes)
+    let scriptContext = try buildScriptContext(
+        for: redeemer, transaction: transaction,
+        resolvedInputs: resolvedInputs, version: version,
+        protocolMajorVersion: protocolMajorVersion, slotTimeline: slotTimeline
+    )
+    let applied = try applyArguments(
+        program: program, redeemer: redeemer, scriptContext: scriptContext,
+        transaction: transaction, resolvedInputs: resolvedInputs, version: version
+    )
+    // Cost the script with the model for its own language version.
+    guard let costModel = costModels[version] else {
+        throw MachineError.typeError(
+            "no cost model available for \(version); the chain's protocol parameters "
+            + "carry none for that Plutus version."
+        )
+    }
+    return PreparedScript(
+        redeemer: redeemer, version: version, program: program,
+        scriptContext: scriptContext, applied: applied, costModel: costModel
+    )
+}
+
 // MARK: — Single-script evaluation
 
 private func evaluateSingleScript(
@@ -216,39 +298,13 @@ private func evaluateSingleScript(
     protocolMajorVersion: Int,
     slotTimeline: SlotTimeline?
 ) async -> RedeemerResult {
+    let prepared: PreparedScript
     do {
-        let (scriptData, version) = try findScript(
-            for: redeemer, in: transaction, resolvedInputs: resolvedInputs
+        prepared = try prepareSingleScript(
+            redeemer: redeemer, transaction: transaction, resolvedInputs: resolvedInputs,
+            costModels: costModels, protocolMajorVersion: protocolMajorVersion,
+            slotTimeline: slotTimeline
         )
-        let flatBytes = try extractFlatBytes(from: scriptData)
-        let program = try FlatDecoder().decode(flatBytes)
-        let scriptContext = try buildScriptContext(
-            for: redeemer, transaction: transaction,
-            resolvedInputs: resolvedInputs, version: version,
-            protocolMajorVersion: protocolMajorVersion, slotTimeline: slotTimeline
-        )
-        let applied = try applyArguments(
-            program: program, redeemer: redeemer, scriptContext: scriptContext,
-            transaction: transaction, resolvedInputs: resolvedInputs, version: version
-        )
-        // An approximate cost model cannot decide budget exhaustion — it
-        // reports correct scripts as out of budget. Evaluate unmetered so the
-        // outcome reflects the script's logic, and say so via
-        // `budgetMeasured`.
-        // Cost the script with the model for its own language version.
-        guard let costModel = costModels[version] else {
-            throw MachineError.typeError(
-                "no cost model available for \(version); the chain's protocol parameters "
-                + "carry none for that Plutus version."
-            )
-        }
-        let budget: ExBudget = costModel.isApproximate ? .unlimited : .restricted
-        var machine = CEKMachine(budget: budget, costModel: costModel)
-        let result = try machine.run(applied)
-        return RedeemerResult(index: index, passed: true,
-                              remainingBudget: result.remainingBudget,
-                              logs: result.logs, error: nil,
-                              budgetMeasured: !costModel.isApproximate)
     } catch let err as MachineError {
         return RedeemerResult(index: index, passed: false,
                               remainingBudget: .restricted,
@@ -264,6 +320,19 @@ private func evaluateSingleScript(
                               logs: [],
                               error: .typeError("script could not be prepared for evaluation: \(error)"))
     }
+
+    // An approximate cost model cannot decide budget exhaustion — it
+    // reports correct scripts as out of budget. The prepared machine runs
+    // unmetered then, and `budgetMeasured` says so.
+    var machine = prepared.machine()
+    let evaluation = machine.evaluate(prepared.applied)
+    let error: MachineError?
+    if case .failure(let failure) = evaluation.outcome { error = failure } else { error = nil }
+    return RedeemerResult(index: index, passed: evaluation.succeeded,
+                          remainingBudget: evaluation.remainingBudget,
+                          logs: evaluation.logs, error: error,
+                          budgetMeasured: prepared.budgetMeasured,
+                          consumedBudget: evaluation.consumedBudget)
 }
 
 // MARK: — Script lookup
@@ -271,7 +340,7 @@ private func evaluateSingleScript(
 /// Locate the Plutus script for a given redeemer by traversing the transaction
 /// witness set and reference scripts on resolved UTxOs.
 /// - Returns: A tuple of the raw script `Data` (CBOR-wrapped flat bytes) and the `PlutusVersion`.
-private func findScript(
+public func findScript(
     for redeemer: Redeemer,
     in transaction: Transaction,
     resolvedInputs: [UTxO]
@@ -485,7 +554,7 @@ private func proposalPolicyHash(_ proposal: ProposalProcedure) -> Data? {
 
 /// Extract the flat-encoded script bytes from a CBOR-wrapped script envelope.
 /// `PlutusV*Script.data` is a single CBOR bytestring wrapping the flat bytes.
-private func extractFlatBytes(from scriptData: Data) throws -> Data {
+public func extractFlatBytes(from scriptData: Data) throws -> Data {
     // The script data is CBOR-encoded: a single CBOR bytestring containing flat bytes.
     // Decode one CBOR layer to get the inner bytes.
     guard scriptData.count > 1 else { return scriptData }
@@ -507,7 +576,9 @@ private func extractFlatBytes(from scriptData: Data) throws -> Data {
 
 // MARK: — Script context construction
 
-func buildScriptContext(
+/// Builds the script context `redeemer`'s script is passed, for its language
+/// version.
+public func buildScriptContext(
     for redeemer: Redeemer,
     transaction: Transaction,
     resolvedInputs: [UTxO],
@@ -650,7 +721,9 @@ func buildScriptContext(
 
 // MARK: — Argument application
 
-private func applyArguments(
+/// Applies a script to its arguments: for V3 the script context alone; for
+/// V1 and V2 the datum (spending scripts only), the redeemer and the context.
+public func applyArguments(
     program: NamedDeBruijnProgram,
     redeemer: Redeemer,
     scriptContext: PlutusData,

@@ -84,6 +84,46 @@ struct MainnetExUnitsTests {
             let memory = ExBudget.restricted.mem - evaluated.remainingBudget.mem
             #expect(steps == declared.steps, "\(label): cpu")
             #expect(memory == declared.memory, "\(label): memory")
+            #expect(evaluated.consumedBudget == ExBudget(cpu: steps, mem: memory), "\(label): consumed")
+        }
+    }
+
+    @Test("A prepared script runs the same observed, and fails cleanly a unit short", arguments: Self.fixtures)
+    func preparedScriptsMatchTheChain(fixture: Fixture) throws {
+        let transaction = try Transaction.fromCBORHex(fixture.transaction)
+        let resolvedInputs = try fixture.resolvedInputs.map { try UTxO.fromCBORHex($0) }
+        let phaseTwo = try PhaseTwo(
+            protocolParameters: try Self.protocolParameters(), slotTimeline: .mainnet
+        )
+        let redeemers = PhaseTwo.redeemers(of: transaction)
+        #expect(redeemers.count == fixture.declared.count)
+
+        for (index, redeemer) in redeemers.enumerated() {
+            guard fixture.declared.indices.contains(index) else { continue }
+            let declared = fixture.declared[index]
+            let label = "\(fixture.name.prefix(16)) redeemer \(index)"
+            let prepared = try phaseTwo.prepareScript(
+                for: redeemer, transaction: transaction, resolvedInputs: resolvedInputs
+            )
+            guard prepared.budgetMeasured else { continue }
+
+            var machine = prepared.machine()
+            var recorder = CEKStepRecorder()
+            _ = try machine.run(prepared.applied, observer: &recorder)
+            let chain = ExBudget(cpu: Int64(declared.steps), mem: Int64(declared.memory))
+            #expect(machine.consumedBudget == chain, "\(label)")
+            #expect(recorder.steps.last?.consumed == chain, "\(label): observed")
+
+            var short = CEKMachine(
+                budget: ExBudget(cpu: Int64(declared.steps) - 1, mem: Int64(declared.memory)),
+                costModel: prepared.costModel
+            )
+            let evaluation = short.evaluate(prepared.applied)
+            guard case .failure(.outOfExBudget) = evaluation.outcome else {
+                Issue.record("\(label): ran within a budget one unit short")
+                continue
+            }
+            #expect(evaluation.consumedBudget.cpu >= Int64(declared.steps), "\(label): short")
         }
     }
 }

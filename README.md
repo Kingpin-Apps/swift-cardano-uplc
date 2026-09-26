@@ -110,6 +110,29 @@ var machine = CEKMachine(
 )
 ```
 
+#### Failures, traces and observing a run
+
+A failed run keeps what it produced: after `run` throws, `machine.logs`,
+`machine.consumedBudget` and `machine.remainingBudget` describe the run up to
+the failure. `evaluate` returns all of it without throwing:
+
+```swift
+let evaluation = machine.evaluate(program)
+evaluation.succeeded      // false when the script failed
+evaluation.logs           // trace messages, up to the failure
+evaluation.consumedBudget // what it spent, even past the limit
+```
+
+Pass a `CEKObserver` to see each step — every term computed and value returned,
+each builtin with its cost, each trace message and how the run ended. An
+unobserved run costs nothing extra.
+
+```swift
+var recorder = CEKStepRecorder()
+_ = try machine.run(program, observer: &recorder)
+for step in recorder.steps { print(step.index, step.event, step.consumed) }
+```
+
 #### Cost model from protocol parameters
 
 `.placeholder()` is not the chain's cost model — its budgets mean nothing, and it
@@ -191,6 +214,11 @@ PlutusV1, V2 and V3 all have their contexts checked against the ledger's, byte f
 byte. V1 and V2 are not a smaller V3 — among other things their mint field always
 carries a zero-ada entry, their withdrawals come in the opposite credential order,
 and V1 holds its withdrawals and datums as lists of pairs rather than maps.
+
+To run one redeemer's script yourself — observed, or again with a changed redeemer
+or datum — `PhaseTwo.prepareScript(for:transaction:resolvedInputs:)` finds, decodes
+and applies it, and `PhaseTwo.redeemers(of:)` lists a transaction's redeemers. Each
+`RedeemerResult` carries `consumedBudget` and the traces of a failing script.
 
 Real mainnet transactions are checked against the units they declare on chain, in
 `MainnetExUnitsTests` — which is what caught V1 and V2 being priced by the wrong
