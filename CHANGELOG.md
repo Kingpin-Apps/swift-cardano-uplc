@@ -1,3 +1,10 @@
+## 0.7.0 (2026-09-26)
+
+### Feat
+
+- **phase-two**: expose script preparation and consumed budget
+- **machine**: keep traces and budget on failure, add step observer
+
 ## 0.6.2 (2026-09-24)
 
 ## 0.6.1 (2026-09-24)
