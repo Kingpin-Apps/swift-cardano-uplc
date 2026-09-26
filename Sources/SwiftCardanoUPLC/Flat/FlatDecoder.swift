@@ -37,45 +37,105 @@ public struct FlatDecoder: Sendable {
 
 // MARK: — Internal decoding helpers
 
+/// A term whose remaining children are still being decoded.
+private enum DecodeFrame {
+    case delay
+    case lambda
+    case force
+    case applyFunction
+    case applyArgument(function: Term<NamedDeBruijn>)
+    case constr(tag: UInt64, fields: [Term<NamedDeBruijn>])
+    case caseArgument
+    case caseBranches(argument: Term<NamedDeBruijn>, branches: [Term<NamedDeBruijn>])
+}
+
+/// Decodes one term with an explicit frame stack rather than recursion, so
+/// deeply nested programs cannot overflow the call stack. Bits are read in
+/// exactly the same order as a recursive pre-order decode.
 private func decodeTerm(_ r: inout BitReader) throws -> Term<NamedDeBruijn> {
-    let tag = try r.readBits(count: 4)
-    switch tag {
-    case 0: // Var
-        let idx = try readUInt(&r)
-        return .var(NamedDeBruijn(text: "i", index: DeBruijn(UInt(idx))))
-    case 1: // Delay
-        return .delay(try decodeTerm(&r))
-    case 2: // Lambda
-        // Binder decodes as DeBruijn(0) — synthetic name
-        let body = try decodeTerm(&r)
-        return .lambda(parameterName: NamedDeBruijn(text: "i", index: DeBruijn(0)), body: body)
-    case 3: // Apply
-        let f = try decodeTerm(&r)
-        let arg = try decodeTerm(&r)
-        return .apply(function: f, argument: arg)
-    case 4: // Constant
-        let c = try decodeConstant(&r)
-        return .constant(c)
-    case 5: // Force
-        return .force(try decodeTerm(&r))
-    case 6: // Error
-        return .error
-    case 7: // Builtin
-        let rawTag = try r.readBits(count: 7)
-        guard let fn = DefaultFunction(rawValue: UInt8(rawTag)) else {
-            throw FlatDecodingError.invalidBuiltinTag(rawTag)
+    var frames: [DecodeFrame] = []
+    while true {
+        var term: Term<NamedDeBruijn>
+        let tag = try r.readBits(count: 4)
+        switch tag {
+        case 0: // Var
+            let idx = try readUInt(&r)
+            term = .var(NamedDeBruijn(text: "i", index: DeBruijn(UInt(idx))))
+        case 1: // Delay
+            frames.append(.delay)
+            continue
+        case 2: // Lambda
+            frames.append(.lambda)
+            continue
+        case 3: // Apply
+            frames.append(.applyFunction)
+            continue
+        case 4: // Constant
+            term = .constant(try decodeConstant(&r))
+        case 5: // Force
+            frames.append(.force)
+            continue
+        case 6: // Error
+            term = .error
+        case 7: // Builtin
+            let rawTag = try r.readBits(count: 7)
+            guard let fn = DefaultFunction(rawValue: UInt8(rawTag)) else {
+                throw FlatDecodingError.invalidBuiltinTag(rawTag)
+            }
+            term = .builtin(fn)
+        case 8: // Constr
+            let constrTag = UInt64(try readUInt(&r))
+            guard try r.readBit() else {
+                term = .constr(tag: constrTag, fields: [])
+                break
+            }
+            frames.append(.constr(tag: constrTag, fields: []))
+            continue
+        case 9: // Case
+            frames.append(.caseArgument)
+            continue
+        default:
+            throw FlatDecodingError.invalidTag(tag)
         }
-        return .builtin(fn)
-    case 8: // Constr
-        let constrTag = try readUInt(&r)
-        let fields = try decodeList(&r) { try decodeTerm(&$0) }
-        return .constr(tag: UInt64(constrTag), fields: fields)
-    case 9: // Case
-        let arg = try decodeTerm(&r)
-        let branches = try decodeList(&r) { try decodeTerm(&$0) }
-        return .case(argument: arg, branches: branches)
-    default:
-        throw FlatDecodingError.invalidTag(tag)
+
+        // `term` is complete: fold it into its parents until one needs another child.
+        reduce: while true {
+            guard let frame = frames.popLast() else { return term }
+            switch frame {
+            case .delay:
+                term = .delay(term)
+            case .lambda:
+                // Binder decodes as DeBruijn(0) — synthetic name
+                term = .lambda(parameterName: NamedDeBruijn(text: "i", index: DeBruijn(0)), body: term)
+            case .force:
+                term = .force(term)
+            case .applyFunction:
+                frames.append(.applyArgument(function: term))
+                break reduce
+            case .applyArgument(let function):
+                term = .apply(function: function, argument: term)
+            case .constr(let tag, var fields):
+                fields.append(term)
+                if try r.readBit() {
+                    frames.append(.constr(tag: tag, fields: fields))
+                    break reduce
+                }
+                term = .constr(tag: tag, fields: fields)
+            case .caseArgument:
+                if try r.readBit() {
+                    frames.append(.caseBranches(argument: term, branches: []))
+                    break reduce
+                }
+                term = .case(argument: term, branches: [])
+            case .caseBranches(let argument, var branches):
+                branches.append(term)
+                if try r.readBit() {
+                    frames.append(.caseBranches(argument: argument, branches: branches))
+                    break reduce
+                }
+                term = .case(argument: argument, branches: branches)
+            }
+        }
     }
 }
 
@@ -239,12 +299,4 @@ private func readByteString(_ r: inout BitReader) throws -> [UInt8] {
         result.append(contentsOf: try r.readBytes(count: len))
     }
     return result
-}
-
-private func decodeList<T>(_ r: inout BitReader, body: (inout BitReader) throws -> T) throws -> [T] {
-    var items = [T]()
-    while try r.readBit() {
-        items.append(try body(&r))
-    }
-    return items
 }

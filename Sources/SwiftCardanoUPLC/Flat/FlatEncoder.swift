@@ -26,45 +26,69 @@ public struct FlatEncoder: Sendable {
 
 // MARK: — Internal encoding helpers
 
+/// A pending unit of encoder output: a term still to encode, or a list-continuation bit.
+private enum EncodeItem {
+    case term(Term<DeBruijn>)
+    case bit(Bool)
+}
+
+/// Encodes a term in pre-order using an explicit work stack rather than
+/// recursion, so deeply nested programs cannot overflow the call stack.
 private func encodeTerm(_ w: inout BitWriter, _ term: Term<DeBruijn>) throws {
-    switch term {
-    case .var(let idx):
-        w.writeBits(0b0000, count: 4)
-        writeUInt(&w, idx.index)
-    case .delay(let body):
-        w.writeBits(0b0001, count: 4)
-        try encodeTerm(&w, body)
-    case .lambda(_, let body):
-        w.writeBits(0b0010, count: 4)
-        // binder: nothing written (DeBruijn binder encodes as zero bytes in Rust)
-        try encodeTerm(&w, body)
-    case .apply(let f, let arg):
-        w.writeBits(0b0011, count: 4)
-        try encodeTerm(&w, f)
-        try encodeTerm(&w, arg)
-    case .constant(let c):
-        w.writeBits(0b0100, count: 4)
-        try encodeConstant(&w, c)
-    case .force(let body):
-        w.writeBits(0b0101, count: 4)
-        try encodeTerm(&w, body)
-    case .error:
-        w.writeBits(0b0110, count: 4)
-    case .builtin(let fn):
-        w.writeBits(0b0111, count: 4)
-        w.writeBits(UInt64(fn.rawValue), count: 7)
-    case .constr(let tag, let fields):
-        w.writeBits(0b1000, count: 4)
-        writeUInt(&w, UInt(tag))
-        try writeList(&w, fields) { f, item in
-            try encodeTerm(&f, item)
+    var work: [EncodeItem] = [.term(term)]
+    while let item = work.popLast() {
+        let term: Term<DeBruijn>
+        switch item {
+        case .bit(let bit):
+            w.writeBit(bit)
+            continue
+        case .term(let t):
+            term = t
         }
-    case .case(let arg, let branches):
-        w.writeBits(0b1001, count: 4)
-        try encodeTerm(&w, arg)
-        try writeList(&w, branches) { f, item in
-            try encodeTerm(&f, item)
+        switch term {
+        case .var(let idx):
+            w.writeBits(0b0000, count: 4)
+            writeUInt(&w, idx.index)
+        case .delay(let body):
+            w.writeBits(0b0001, count: 4)
+            work.append(.term(body))
+        case .lambda(_, let body):
+            w.writeBits(0b0010, count: 4)
+            // binder: nothing written (DeBruijn binder encodes as zero bytes in Rust)
+            work.append(.term(body))
+        case .apply(let f, let arg):
+            w.writeBits(0b0011, count: 4)
+            work.append(.term(arg))
+            work.append(.term(f))
+        case .constant(let c):
+            w.writeBits(0b0100, count: 4)
+            try encodeConstant(&w, c)
+        case .force(let body):
+            w.writeBits(0b0101, count: 4)
+            work.append(.term(body))
+        case .error:
+            w.writeBits(0b0110, count: 4)
+        case .builtin(let fn):
+            w.writeBits(0b0111, count: 4)
+            w.writeBits(UInt64(fn.rawValue), count: 7)
+        case .constr(let tag, let fields):
+            w.writeBits(0b1000, count: 4)
+            writeUInt(&w, UInt(tag))
+            appendTermList(&work, fields)
+        case .case(let arg, let branches):
+            w.writeBits(0b1001, count: 4)
+            appendTermList(&work, branches)
+            work.append(.term(arg))
         }
+    }
+}
+
+/// Push a flat term list (1-bit per element, terminated by 0) so it pops in order.
+private func appendTermList(_ work: inout [EncodeItem], _ terms: [Term<DeBruijn>]) {
+    work.append(.bit(false))
+    for term in terms.reversed() {
+        work.append(.term(term))
+        work.append(.bit(true))
     }
 }
 
@@ -205,13 +229,4 @@ private func writeByteString(_ w: inout BitWriter, _ bytes: [UInt8]) {
         offset += chunkLen
     }
     w.writeBits(0, count: 8) // terminating zero-length chunk
-}
-
-/// Write a list of items using the flat list encoding (1-bit per element).
-private func writeList<T>(_ w: inout BitWriter, _ items: [T], body: (inout BitWriter, T) throws -> Void) rethrows {
-    for item in items {
-        w.writeBit(true)
-        try body(&w, item)
-    }
-    w.writeBit(false)
 }

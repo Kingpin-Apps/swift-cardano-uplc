@@ -172,7 +172,7 @@ struct FlatEncodingTests {
     // MARK: — Encode round-trip fixtures (Aiken integ_tests equivalent)
 
     /// Parse jpg.uplc → encode to flat → compare byte-for-byte with jpg.flat.
-    /// jpg.uplc is ~9700 lines; the recursive encoder can overflow the default stack,
+    /// jpg.uplc is ~9700 lines; the recursive parser can overflow the default stack,
     /// so the work runs on a thread with 64 MB of stack space.
     @Test func encodeJpgMatchesFixture() throws {
         guard
@@ -184,7 +184,7 @@ struct FlatEncodingTests {
         let uplcText = try String(contentsOf: uplcURL, encoding: .utf8)
         let expectedBytes = try Data(contentsOf: flatURL)
 
-        // Run the recursive parse + encode on a thread with a larger stack.
+        // Run the recursive parse on a thread with a larger stack.
         enum Result { case success(Data); case failure(Error) }
         nonisolated(unsafe) var threadResult: Result?
         let sema = DispatchSemaphore(value: 0)
