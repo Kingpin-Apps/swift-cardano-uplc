@@ -1,5 +1,5 @@
 /// Internal machine state.
-private enum MachineState: Sendable {
+enum MachineState: Sendable {
     /// Computing a term in a given environment with the given continuation.
     case compute(Context, Environment, Term<NamedDeBruijn>)
     /// Returning a value to the continuation.
@@ -12,13 +12,13 @@ private enum MachineState: Sendable {
 public struct CEKMachine: Sendable {
     private var budget: ExBudget
     private let initialBudget: ExBudget
-    private let costModel: CostModel
+    let costModel: CostModel
     /// Trace log entries emitted so far by `trace` builtins. They stay
     /// readable after ``run(_:)`` throws, so a failing script's traces are
     /// not lost.
     public private(set) var logs: [String]
     /// The builtin most recently charged, for an observer to report.
-    private var lastBuiltin: (DefaultFunction, ExBudget)?
+    var lastBuiltin: (DefaultFunction, ExBudget)?
     /// Number of unbudgeted steps to batch before spending budget.
     private let slippage: Int = 200
     private var unbudgetedSteps: [Int: Int32] = [:]
@@ -135,7 +135,7 @@ public struct CEKMachine: Sendable {
 
     // MARK: — Compute step (term → value or new computation)
 
-    private mutating func computeStep(
+    mutating func computeStep(
         _ ctx: Context,
         _ env: Environment,
         _ term: Term<NamedDeBruijn>
@@ -190,7 +190,7 @@ public struct CEKMachine: Sendable {
 
     // MARK: — Return step (value → apply continuation)
 
-    private mutating func returnStep(_ ctx: Context, _ value: Value) throws -> MachineState {
+    mutating func returnStep(_ ctx: Context, _ value: Value) throws -> MachineState {
         switch ctx {
         case .noFrame:
             return .done(try dischargeTo(value))
@@ -307,7 +307,7 @@ public struct CEKMachine: Sendable {
         }
     }
 
-    private mutating func spendUnbudgetedSteps() throws {
+    mutating func spendUnbudgetedSteps() throws {
         // Clear the batch before charging it, so a charge that runs out of
         // budget part way leaves nothing counted twice by `remainingBudget`.
         let pending = unbudgetedSteps
@@ -340,7 +340,7 @@ public struct CEKMachine: Sendable {
         try spendBudget(cost)
     }
 
-    private mutating func spendBudget(_ cost: ExBudget) throws {
+    mutating func spendBudget(_ cost: ExBudget) throws {
         try budget.spend(cpu: cost.cpu, mem: cost.mem)
     }
 
@@ -381,7 +381,7 @@ public struct CEKMachine: Sendable {
 
     // MARK: — Value → Term discharge (for result)
 
-    private func dischargeTo(_ value: Value) throws -> Term<NamedDeBruijn> {
+    func dischargeTo(_ value: Value) throws -> Term<NamedDeBruijn> {
         switch value {
         case .con(let c):
             return .constant(c)

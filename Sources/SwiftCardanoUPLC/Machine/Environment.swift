@@ -12,6 +12,9 @@ public struct Environment: Sendable {
         Environment(bindings: bindings + [value])
     }
 
+    /// The values bound, oldest first: the last is De Bruijn index 1.
+    public var values: [Value] { bindings }
+
     /// Look up the value at De Bruijn index `index` (1-based from the end).
     public func lookup(_ index: DeBruijn) throws -> Value {
         let i = index.index
