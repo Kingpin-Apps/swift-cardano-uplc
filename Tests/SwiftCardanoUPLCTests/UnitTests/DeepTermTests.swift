@@ -255,7 +255,7 @@ private func dismantle(_ data: inout PlutusData) {
             pending.append(contentsOf: items)
         case .indefiniteArray(let items):
             pending.append(contentsOf: items.map { $0 })
-        case .map(let entries):
+        case .map(let entries), .indefiniteMap(let entries):
             for (key, value) in entries {
                 pending.append(key)
                 pending.append(value)

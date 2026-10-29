@@ -206,7 +206,7 @@ public struct PrettyPrinter: Sendable {
                     out += "Constr \(displayTag) ["
                     work.append(.text("]"))
                     work.appendSeparated(c.fields)
-                case .map(let m):
+                case .map(let m), .indefiniteMap(let m):
                     out += "Map ["
                     work.append(.text("]"))
                     // Push entries in reverse so they pop in dictionary order.

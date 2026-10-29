@@ -34,7 +34,7 @@ enum ExMemory {
             switch node {
             case .constructor(let constr):
                 stack.append(contentsOf: constr.fields)
-            case .map(let entries):
+            case .map(let entries), .indefiniteMap(let entries):
                 for (key, value) in entries {
                     stack.append(key)
                     stack.append(value)

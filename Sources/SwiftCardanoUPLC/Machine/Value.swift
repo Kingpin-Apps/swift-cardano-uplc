@@ -64,7 +64,7 @@ extension PlutusData {
         switch self {
         case .constructor(let c):
             return 4 + c.fields.reduce(0) { $0 + $1.exMem() }
-        case .map(let m):
+        case .map(let m), .indefiniteMap(let m):
             return 4 + m.reduce(0) { $0 + $1.key.exMem() + $1.value.exMem() }
         case .array(let a):
             return 4 + a.reduce(0) { $0 + $1.exMem() }

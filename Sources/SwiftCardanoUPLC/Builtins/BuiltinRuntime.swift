@@ -219,7 +219,7 @@ public struct BuiltinRuntime: Sendable {
             let pd = try plutusData(args[0])
             switch pd {
             case .constructor: return args[1]
-            case .map:         return args[2]
+            case .map, .indefiniteMap: return args[2]
             case .array, .indefiniteArray: return args[3]
             case .bigInt:      return args[4]
             case .bytes:       return args[5]
@@ -250,7 +250,7 @@ public struct BuiltinRuntime: Sendable {
             return .con(.pair(.integer, .list(.data), tag, fields))
         case .unMapData:
             let pd = try plutusData(args[0])
-            guard case .map(let m) = pd else { throw MachineError.typeError("unMapData") }
+            guard let m = pd.mapEntries else { throw MachineError.typeError("unMapData") }
             let pairs: [UPLCConstant] = m.map { .pair(.data, .data, .data($0.key), .data($0.value)) }
             return .con(.list(.pair(.data, .data), pairs))
         case .unListData:
@@ -282,7 +282,7 @@ public struct BuiltinRuntime: Sendable {
             let b = try plutusData(args[1])
             return .con(.bool(a == b))
         case .serialiseData:
-            let pd = try plutusData(args[0])
+            let pd = try serialisable(try plutusData(args[0]))
             let cborBytes = try pd.toCBORData()
             return .con(.byteString(Data(cborBytes)))
         case .mkPairData:
@@ -507,6 +507,30 @@ private func constant(_ v: Value) throws -> UPLCConstant {
 private func plutusData(_ v: Value) throws -> PlutusData {
     guard case .con(.data(let pd)) = v else { throw MachineError.typeError("expected data") }
     return pd
+}
+
+/// `data` with its maps definite and its byte strings rechunked, as the
+/// ledger's `serialiseData` writes them. Decoded data keeps the encoding it
+/// was read with, so an indefinite map or a byte string in odd-sized chunks
+/// would otherwise serialise differently from the ledger.
+private func serialisable(_ data: PlutusData) throws -> PlutusData {
+    switch data {
+    case .constructor(let c):
+        return .constructor(Constr(
+            tag: c.tag, fields: try c.fields.map(serialisable), useIndefiniteList: c.useIndefiniteList))
+    case .map(let m), .indefiniteMap(let m):
+        var dict = OrderedDictionary<PlutusData, PlutusData>()
+        for (k, v) in m { dict[try serialisable(k)] = try serialisable(v) }
+        return .map(dict)
+    case .array(let a):
+        return .array(try a.map(serialisable))
+    case .indefiniteArray(let a):
+        return .indefiniteArray(IndefiniteList(try a.map(serialisable)))
+    case .bigInt:
+        return data
+    case .bytes(let b):
+        return .bytes(try Bytes(from: b.data))
+    }
 }
 
 private func twoIntegers(_ args: [Value]) throws -> (BigInt, BigInt) {
