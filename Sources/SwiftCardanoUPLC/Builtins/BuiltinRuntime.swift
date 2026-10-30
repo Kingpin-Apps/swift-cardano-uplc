@@ -559,7 +559,8 @@ private func listOfPairs(_ v: Value) throws -> [(PlutusData, PlutusData)] {
 
 private func listOfIntPairs(_ v: Value) throws -> [Int] {
     guard case .con(.list(_, let items)) = v else { throw MachineError.typeError("expected list") }
-    return try items.map { Int(try integer(.con($0))) }
+    // An index beyond Int's range is out of bounds: a failure, not a trap.
+    return try items.map { try safeInt(try integer(.con($0))) }
 }
 
 // MARK: — BLS12-381 argument extraction helpers
