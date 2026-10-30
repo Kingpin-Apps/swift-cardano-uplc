@@ -1,3 +1,11 @@
+## 0.8.1 (2026-10-30)
+
+### Fix
+
+- **builtins**: fail writeBits on an out-of-range index instead of trapping
+- build against swift-cardano-core 0.10
+- **data**: treat indefinite Plutus maps as maps
+
 ## 0.8.0 (2026-10-05)
 
 ### Feat
