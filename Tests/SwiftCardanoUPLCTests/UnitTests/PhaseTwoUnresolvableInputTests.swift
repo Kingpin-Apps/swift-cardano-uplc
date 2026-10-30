@@ -138,6 +138,10 @@ private func makeTransaction(spendRedeemerCount: Int) -> Transaction {
 
 // MARK: — Protocol parameters fixture
 
+private func unit(_ numerator: UInt64, _ denominator: UInt64) -> UnitInterval {
+    UnitInterval(numerator: numerator, denominator: denominator)
+}
+
 private func dummyProtocolParameters() -> ProtocolParameters {
     ProtocolParameters(
         collateralPercentage: 150,
@@ -147,13 +151,15 @@ private func dummyProtocolParameters() -> ProtocolParameters {
         dRepActivity: 20,
         dRepDeposit: 500_000_000,
         dRepVotingThresholds: DRepVotingThresholds(
-            committeeNoConfidence: 0.6, committeeNormal: 0.65,
-            hardForkInitiation: 0.6, motionNoConfidence: 0.6,
-            ppEconomicGroup: 0.67, ppGovGroup: 0.75,
-            ppNetworkGroup: 0.67, ppTechnicalGroup: 0.67,
-            treasuryWithdrawal: 0.67, updateToConstitution: 0.75
+            committeeNoConfidence: unit(3, 5), committeeNormal: unit(13, 20),
+            hardForkInitiation: unit(3, 5), motionNoConfidence: unit(3, 5),
+            ppEconomicGroup: unit(67, 100), ppGovGroup: unit(3, 4),
+            ppNetworkGroup: unit(67, 100), ppTechnicalGroup: unit(67, 100),
+            treasuryWithdrawal: unit(67, 100), updateToConstitution: unit(3, 4)
         ),
-        executionUnitPrices: ExecutionUnitPrices(priceMemory: 0.0577, priceSteps: 0.0000721),
+        executionUnitPrices: ExecutionUnitPrices(
+            priceMemory: NonNegativeInterval(numerator: 577, denominator: 10_000),
+            priceSteps: NonNegativeInterval(numerator: 721, denominator: 10_000_000)),
         govActionDeposit: 100_000_000_000,
         govActionLifetime: 6,
         maxBlockBodySize: 90112,
@@ -164,19 +170,19 @@ private func dummyProtocolParameters() -> ProtocolParameters {
         maxTxSize: 16384,
         maxValueSize: 5000,
         minPoolCost: 170_000_000,
-        monetaryExpansion: 0.003,
-        poolPledgeInfluence: 0.3,
+        monetaryExpansion: unit(3, 1000),
+        poolPledgeInfluence: NonNegativeInterval(numerator: 3, denominator: 10),
         poolRetireMaxEpoch: 18,
         poolVotingThresholds: ProtocolParametersPoolVotingThresholds(
-            committeeNoConfidence: 0.6, committeeNormal: 0.65,
-            hardForkInitiation: 0.51, motionNoConfidence: 0.6,
-            ppSecurityGroup: 0.75
+            committeeNoConfidence: unit(3, 5), committeeNormal: unit(13, 20),
+            hardForkInitiation: unit(51, 100), motionNoConfidence: unit(3, 5),
+            ppSecurityGroup: unit(3, 4)
         ),
         protocolVersion: ProtocolParametersProtocolVersion(major: 9, minor: 0),
         stakeAddressDeposit: 2_000_000,
         stakePoolDeposit: 500_000_000,
         stakePoolTargetNum: 500,
-        treasuryCut: 0.2,
+        treasuryCut: unit(1, 5),
         txFeeFixed: 155381,
         txFeePerByte: 44,
         utxoCostPerByte: 4310

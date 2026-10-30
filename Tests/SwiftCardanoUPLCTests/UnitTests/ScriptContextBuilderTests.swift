@@ -21,12 +21,12 @@ private extension PlutusData {
     /// ledger's canonical indefinite form for non-empty lists.
     var arrayItems: [PlutusData]? {
         switch self {
-        case .array(let items):           return items
+        case .array(let items):           return Array(items)
         case .indefiniteArray(let items): return items.getAll()
         default:                          return nil
         }
     }
-    var mapEntries: OrderedDictionary<PlutusData, PlutusData>? {
+    var mapEntries: MapPairs<PlutusData, PlutusData>? {
         if case .map(let m) = self { return m }
         return nil
     }
@@ -952,7 +952,7 @@ struct CanonicalContextDataTests {
     func valueOrdering() throws {
         var multiAsset = MultiAsset([:])
         for policyByte in [UInt8(0xCC), 0x11, 0x77] {
-            let policy = try ScriptHash(payload: Data(repeating: policyByte, count: SCRIPT_HASH_SIZE))
+            let policy = ScriptHash(payload: Data(repeating: policyByte, count: SCRIPT_HASH_SIZE))
             multiAsset[policy] = Asset([
                 try AssetName(payload: Data([0x7A])): 1,
                 try AssetName(payload: Data([0x0A])): 2,

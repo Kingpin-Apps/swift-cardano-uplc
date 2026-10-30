@@ -235,8 +235,8 @@ struct PlutusDataExMemTests {
 
     @Test("map cost is 4 plus the sum of key and value costs")
     func map_withEntries() {
-        var dict = OrderedDictionary<PlutusData, PlutusData>()
-        dict[.bytes(.byteString(ByteString(bytes: Data())))] = .bigInt(.int(0))  // 1 + 1
+        var dict = MapPairs<PlutusData, PlutusData>()
+        dict.append(key: .bytes(.byteString(ByteString(bytes: Data()))), value: .bigInt(.int(0)))  // 1 + 1
         let pd = PlutusData.map(dict)
         // 4 + (1 + 1) == 6
         #expect(pd.exMem() == 6)

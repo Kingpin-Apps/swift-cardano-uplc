@@ -230,9 +230,8 @@ public struct BuiltinRuntime: Sendable {
             return .con(.data(.constructor(Constr(tag: tag, fields: fields))))
         case .mapData:
             let pairs = try listOfPairs(args[0])
-            var dict = OrderedDictionary<PlutusData, PlutusData>()
-            for (k, v) in pairs { dict[k] = v }
-            return .con(.data(.map(dict)))
+            // Every pair, in order: Plutus maps may repeat a key.
+            return .con(.data(.map(MapPairs(pairs))))
         case .listData:
             let items = try listOfData(args[0])
             return .con(.data(.array(items)))
@@ -519,9 +518,9 @@ private func serialisable(_ data: PlutusData) throws -> PlutusData {
         return .constructor(Constr(
             tag: c.tag, fields: try c.fields.map(serialisable), useIndefiniteList: c.useIndefiniteList))
     case .map(let m), .indefiniteMap(let m):
-        var dict = OrderedDictionary<PlutusData, PlutusData>()
-        for (k, v) in m { dict[try serialisable(k)] = try serialisable(v) }
-        return .map(dict)
+        var pairs = MapPairs<PlutusData, PlutusData>()
+        for (k, v) in m { pairs.append(key: try serialisable(k), value: try serialisable(v)) }
+        return .map(pairs)
     case .array(let a):
         return .array(try a.map(serialisable))
     case .indefiniteArray(let a):

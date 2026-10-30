@@ -1,3 +1,4 @@
+import BigInt
 import Foundation
 import OrderedCollections
 import SwiftCardanoCore
@@ -187,7 +188,7 @@ public struct ScriptContextBuilder: Sendable {
             slotTimeline: slotTimeline
         )
         let scriptInfo = constr(3, [
-            .bigInt(.int(Int64(certificateIndex))),
+            integerData(certificateIndex),
             try certificateDataV3(
                 certificates[certificateIndex],
                 protocolMajorVersion: protocolMajorVersion
@@ -242,7 +243,7 @@ public struct ScriptContextBuilder: Sendable {
             slotTimeline: slotTimeline
         )
         let scriptInfo = constr(5, [
-            .bigInt(.int(Int64(proposalIndex))),
+            integerData(proposalIndex),
             try proposalProcedureData(
                 proposals[proposalIndex],
                 protocolMajorVersion: protocolMajorVersion
@@ -281,7 +282,7 @@ private func buildSpendingPurpose(input: TransactionInput) throws -> PlutusData 
     let txId = PlutusData.constructor(Constr(tag: 0, fields: [
         .bytes(try Bytes(from: input.transactionId.payload))
     ]))
-    let idx = PlutusData.bigInt(.int(Int64(input.index)))
+    let idx = integerData(input.index)
     let txInInfo = PlutusData.constructor(Constr(tag: 0, fields: [txId, idx]))
     return .constructor(Constr(tag: 1, fields: [txInInfo]))  // Spending
 }
@@ -323,7 +324,7 @@ private func buildTxInfo(
     let outputs = dataList(try body.outputs.map { try txOutData($0, version: version) })
 
     // Fee as a lovelace-only Value: Map { b"" => Map { b"" => fee } }
-    let fee = valueDataFromCoin(Int(body.fee))
+    let fee = valueDataFromCoin(body.fee)
 
     // Mint, which in V1 and V2 always carries a zero-lovelace entry.
     let mint = mintValueData(body.mint, version: version)
@@ -410,7 +411,7 @@ private func buildTxInfoV3(
     let outputs = dataList(try body.outputs.map { try txOutData($0, version: .v3) })
 
     // Lovelace is a bare integer in V3, not a Value.
-    let fee = PlutusData.bigInt(.int(Int64(body.fee)))
+    let fee = integerData(body.fee)
 
     let mint = mintValueData(body.mint, version: .v3)
 
@@ -444,11 +445,11 @@ private func buildTxInfoV3(
             try proposalProcedureData($0, protocolMajorVersion: protocolMajorVersion)
         }
     )
-    let treasuryAmount = maybeData(body.currentTreasuryAmount.map { .bigInt(.int(Int64($0))) })
+    let treasuryAmount = maybeData(body.currentTreasuryAmount.map { integerData($0) })
     // A donation of zero is the same as no donation, and the ledger shows it as
     // `None` rather than `Some 0`.
-    let donated = body.treasuryDonation.map { Int64($0.value) } ?? 0
-    let treasuryDonation = maybeData(donated == 0 ? nil : .bigInt(.int(donated)))
+    let donated = body.treasuryDonation?.value ?? 0
+    let treasuryDonation = maybeData(donated == 0 ? nil : integerData(donated))
 
     return .constructor(Constr(tag: 0, fields: [
         inputs, referenceInputs, outputs, fee, mint, certificates, withdrawals,
@@ -519,14 +520,14 @@ private func withdrawalsDataV1V2(
     var pairs: [(key: PlutusData, value: PlutusData)] = []
     for entry in entries {
         let credential = try credentialData(hash: entry.hash, isScript: entry.isScript)
-        pairs.append((constr(0, [credential]), .bigInt(.int(entry.amount))))
+        pairs.append((constr(0, [credential]), integerData(entry.amount)))
     }
     if version == .v1 {
         return dataList(pairs.map { constr(0, [$0.key, $0.value]) })
     }
     var map = OrderedDictionary<PlutusData, PlutusData>()
     for pair in pairs { map[pair.key] = pair.value }
-    return map.isEmpty ? .map([:]) : .map(map)
+    return map.isEmpty ? .map([:]) : .map(MapPairs(map))
 }
 
 /// `redeemers: Map ScriptPurpose Redeemer` for V2.
@@ -570,7 +571,7 @@ private func redeemersMapV1V2(transaction: Transaction) throws -> PlutusData {
                 .bytes(try Bytes(from: input.transactionId.payload))
             ]))
             let outRef = PlutusData.constructor(Constr(tag: 0, fields: [
-                txId, .bigInt(.int(Int64(input.index)))
+                txId, integerData(input.index)
             ]))
             pairs.append((0, entry.index, constr(1, [outRef]), entry.data))
         case .mint:
@@ -622,7 +623,7 @@ private func redeemersMapV1V2(transaction: Transaction) throws -> PlutusData {
     }) {
         map[pair.key] = pair.value
     }
-    return map.isEmpty ? .map([:]) : .map(map)
+    return map.isEmpty ? .map([:]) : .map(MapPairs(map))
 }
 
 /// `OutputReference { transaction_id: ByteString, output_index: Int }`.
@@ -630,7 +631,7 @@ private func redeemersMapV1V2(transaction: Transaction) throws -> PlutusData {
 private func outputReferenceV3(_ input: TransactionInput) throws -> PlutusData {
     .constructor(Constr(tag: 0, fields: [
         .bytes(try Bytes(from: input.transactionId.payload)),
-        .bigInt(.int(Int64(input.index))),
+        integerData(input.index),
     ]))
 }
 
@@ -655,7 +656,7 @@ func dataList(_ items: [PlutusData]) -> PlutusData {
 struct WithdrawalCredential: Sendable {
     let isScript: Bool
     let hash: Data
-    let amount: Int64
+    let amount: Coin
 }
 
 func orderedWithdrawalCredentials(_ withdrawals: Withdrawals?) -> [WithdrawalCredential] {
@@ -666,13 +667,21 @@ func orderedWithdrawalCredentials(_ withdrawals: Withdrawals?) -> [WithdrawalCre
         entries.append(WithdrawalCredential(
             isScript: (header & 0x10) != 0,
             hash: Data(rewardAccount.dropFirst()),
-            amount: Int64(coin)
+            amount: coin
         ))
     }
     return entries.sorted {
         if $0.isScript != $1.isScript { return $0.isScript }
         return $0.hash.lexicographicallyPrecedes($1.hash)
     }
+}
+
+/// A Plutus integer holding `value` exactly. A value that fits `Int64` is held
+/// as `.int`, as before; a larger one (a `Coin` or ratio part above
+/// `Int64.max`, which the ledger allows) as a bignum, rather than trapping.
+func integerData<T: BinaryInteger>(_ value: T) -> PlutusData {
+    if let small = Int64(exactly: value) { return .bigInt(.int(small)) }
+    return .bigInt(BigInteger(bigInt: BigInt(value)))
 }
 
 /// A Plutus constructor, spelled out once so the encoders below read as the
@@ -702,9 +711,9 @@ private func withdrawalsDataV3(_ withdrawals: Withdrawals?) throws -> PlutusData
     var map = OrderedDictionary<PlutusData, PlutusData>()
     for entry in entries {
         map[try credentialData(hash: entry.hash, isScript: entry.isScript)] =
-            .bigInt(.int(entry.amount))
+            integerData(entry.amount)
     }
-    return .map(map)
+    return .map(MapPairs(map))
 }
 
 /// `redeemers: Pairs<ScriptPurpose, Redeemer>`.
@@ -767,7 +776,7 @@ private func redeemersMapV3(
                 )
             }
             purpose = constr(3, [
-                .bigInt(.int(Int64(entry.index))),
+                integerData(entry.index),
                 try certificateDataV3(
                     certificates[entry.index], protocolMajorVersion: protocolMajorVersion
                 ),
@@ -800,7 +809,7 @@ private func redeemersMapV3(
                 )
             }
             purpose = constr(5, [
-                .bigInt(.int(Int64(entry.index))),
+                integerData(entry.index),
                 try proposalProcedureData(
                     proposals[entry.index], protocolMajorVersion: protocolMajorVersion
                 ),
@@ -819,7 +828,7 @@ private func redeemersMapV3(
     }) {
         map[pair.key] = pair.value
     }
-    return map.isEmpty ? .map([:]) : .map(map)
+    return map.isEmpty ? .map([:]) : .map(MapPairs(map))
 }
 
 /// A redeemer tag's place in the ledger's ordering, which is the number it
@@ -860,7 +869,7 @@ private func txInInfoData(utxo: UTxO, version: PlutusVersion) throws -> PlutusDa
     let txId = PlutusData.constructor(Constr(tag: 0, fields: [
         .bytes(try Bytes(from: utxo.input.transactionId.payload))
     ]))
-    let idx = PlutusData.bigInt(.int(Int64(utxo.input.index)))
+    let idx = integerData(utxo.input.index)
     let outRef = PlutusData.constructor(Constr(tag: 0, fields: [txId, idx]))
     let out = try txOutData(utxo.output, version: version)
     return .constructor(Constr(tag: 0, fields: [outRef, out]))
@@ -947,9 +956,9 @@ private func addressData(_ address: Address) throws -> PlutusData {
         stakingCred = .constructor(Constr(tag: 0, fields: [sc]))
     case .pointerAddress(let ptr):
         let sc = PlutusData.constructor(Constr(tag: 1, fields: [
-            .bigInt(.int(Int64(ptr.slot))),
-            .bigInt(.int(Int64(ptr.txIndex))),
-            .bigInt(.int(Int64(ptr.certIndex)))
+            integerData(ptr.slot),
+            integerData(ptr.txIndex),
+            integerData(ptr.certIndex)
         ]))
         stakingCred = .constructor(Constr(tag: 0, fields: [sc]))
     case nil:
@@ -967,16 +976,16 @@ private func valueData(_ txValue: SwiftCardanoCore.Value) -> PlutusData {
     let adaKey = PlutusData.bytes(.byteString(ByteString(bytes: Data())))
     let tnKey  = PlutusData.bytes(.byteString(ByteString(bytes: Data())))
     var adaInner = OrderedDictionary<PlutusData, PlutusData>()
-    adaInner[tnKey] = .bigInt(.int(Int64(txValue.coin)))
+    adaInner[tnKey] = integerData(txValue.coin)
     var map = OrderedDictionary<PlutusData, PlutusData>()
-    map[adaKey] = .map(adaInner)
+    map[adaKey] = .map(MapPairs(adaInner))
 
     for (policyId, asset) in canonicalAssets(txValue.multiAsset) {
         let csKey = PlutusData.bytes(.byteString(ByteString(bytes: policyId.payload)))
         map[csKey] = .map(tokenMap(for: asset))
     }
 
-    return .map(map)
+    return .map(MapPairs(map))
 }
 
 /// A multi-asset's policies in canonical order.
@@ -993,26 +1002,28 @@ private func canonicalAssets(_ multiAsset: MultiAsset) -> [(ScriptHash, SwiftCar
 }
 
 /// One policy's token map, in canonical asset-name order.
-private func tokenMap(for asset: SwiftCardanoCore.Asset) -> OrderedDictionary<PlutusData, PlutusData> {
-    var tokens = OrderedDictionary<PlutusData, PlutusData>()
+private func tokenMap(for asset: SwiftCardanoCore.Asset) -> MapPairs<PlutusData, PlutusData> {
+    var tokens = MapPairs<PlutusData, PlutusData>()
     let sorted = asset.data
         .map { ($0.key, $0.value) }
         .sorted { $0.0.payload.lexicographicallyPrecedes($1.0.payload) }
     for (assetName, amount) in sorted {
-        tokens[.bytes(.byteString(ByteString(bytes: assetName.payload)))] = .bigInt(.int(Int64(amount)))
+        tokens.append(
+            key: .bytes(.byteString(ByteString(bytes: assetName.payload))),
+            value: integerData(amount))
     }
     return tokens
 }
 
 /// Encode a lovelace-only Value (for fee): `Map { b"" => Map { b"" => coin } }`
-private func valueDataFromCoin(_ coin: Int) -> PlutusData {
+private func valueDataFromCoin(_ coin: Coin) -> PlutusData {
     let adaKey = PlutusData.bytes(.byteString(ByteString(bytes: Data())))
     let tnKey  = PlutusData.bytes(.byteString(ByteString(bytes: Data())))
     var adaInner = OrderedDictionary<PlutusData, PlutusData>()
-    adaInner[tnKey] = .bigInt(.int(Int64(coin)))
+    adaInner[tnKey] = integerData(coin)
     var map = OrderedDictionary<PlutusData, PlutusData>()
-    map[adaKey] = .map(adaInner)
-    return .map(map)
+    map[adaKey] = .map(MapPairs(adaInner))
+    return .map(MapPairs(map))
 }
 
 /// Encode a `MultiAsset` (the mint field) as a Plutus Value map — no ADA entry.
@@ -1027,7 +1038,7 @@ private func mintValueData(_ multiAsset: MultiAsset?, version: PlutusVersion) ->
     var map = OrderedDictionary<PlutusData, PlutusData>()
     if version != .v3 {
         map[.bytes(.byteString(ByteString(bytes: Data())))] = .map(
-            OrderedDictionary(uniqueKeysWithValues: [
+            MapPairs([
                 (PlutusData.bytes(.byteString(ByteString(bytes: Data()))), PlutusData.bigInt(.int(0)))
             ])
         )
@@ -1035,7 +1046,7 @@ private func mintValueData(_ multiAsset: MultiAsset?, version: PlutusVersion) ->
     for (policyId, asset) in canonicalAssets(multiAsset ?? MultiAsset([:])) {
         map[.bytes(.byteString(ByteString(bytes: policyId.payload)))] = .map(tokenMap(for: asset))
     }
-    return map.isEmpty ? .map([:]) : .map(map)
+    return map.isEmpty ? .map([:]) : .map(MapPairs(map))
 }
 
 // MARK: — Datums map
@@ -1068,7 +1079,7 @@ private func buildDatumsMap(
     }
     var map = OrderedDictionary<PlutusData, PlutusData>()
     for pair in pairs { map[pair.key] = pair.value }
-    return map.isEmpty ? .map([:]) : .map(map)
+    return map.isEmpty ? .map([:]) : .map(MapPairs(map))
 }
 
 // MARK: — ValidRange

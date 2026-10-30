@@ -524,7 +524,8 @@ public struct UPLCParser: Sendable {
                     break reduce
                 case .mapValue(var entries, let key):
                     try consume(")", in: &tokens)
-                    entries[key] = data
+                    // Every pair, in order: a Plutus map may repeat a key.
+                    entries.append(key: key, value: data)
                     if try beginMapEntry(&tokens) {
                         frames.append(.mapKey(entries: entries))
                         break reduce
@@ -642,8 +643,8 @@ private enum DataFrame {
     case parenthesized
     case constr(tag: UInt64, fields: [PlutusData])
     case list(items: [PlutusData])
-    case mapKey(entries: OrderedDictionary<PlutusData, PlutusData>)
-    case mapValue(entries: OrderedDictionary<PlutusData, PlutusData>, key: PlutusData)
+    case mapKey(entries: MapPairs<PlutusData, PlutusData>)
+    case mapValue(entries: MapPairs<PlutusData, PlutusData>, key: PlutusData)
 }
 
 // MARK: — Builtin name → DefaultFunction

@@ -27,7 +27,7 @@ struct IndefiniteMapDataTests {
         return try BuiltinRuntime.apply(function, to: args, costModel: .placeholder(), logs: &logs)
     }
 
-    private let definite = PlutusData.map(OrderedDictionary(uniqueKeysWithValues: [
+    private let definite = PlutusData.map(MapPairs([
         (PlutusData.bigInt(.int(1)), PlutusData.bigInt(.int(2)))
     ]))
 

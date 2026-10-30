@@ -221,7 +221,7 @@ public struct PrettyPrinter: Sendable {
                 case .array(let a):
                     out += "List ["
                     work.append(.text("]"))
-                    work.appendSeparated(a)
+                    work.appendSeparated(a.array)
                 case .indefiniteArray(let a):
                     out += "List ["
                     work.append(.text("]"))

@@ -75,15 +75,15 @@ struct PlutusDataSemanticsTests {
 
     @Test("A map keeps its order, because a Plutus map is a list of pairs")
     func maps() throws {
-        let forwards = PlutusData.map(OrderedDictionary(uniqueKeysWithValues: [
+        let forwards = PlutusData.map(MapPairs([
             (PlutusData.bigInt(.int(1)), PlutusData.bigInt(.int(10))),
             (PlutusData.bigInt(.int(2)), PlutusData.bigInt(.int(20))),
         ]))
-        let sameHeldDifferently = PlutusData.map(OrderedDictionary(uniqueKeysWithValues: [
+        let sameHeldDifferently = PlutusData.map(MapPairs([
             (PlutusData.bigInt(.bigUInt(BigUInt(1))), PlutusData.bigInt(.int(10))),
             (PlutusData.bigInt(.int(2)), PlutusData.bigInt(.bigUInt(BigUInt(20)))),
         ]))
-        let backwards = PlutusData.map(OrderedDictionary(uniqueKeysWithValues: [
+        let backwards = PlutusData.map(MapPairs([
             (PlutusData.bigInt(.int(2)), PlutusData.bigInt(.int(20))),
             (PlutusData.bigInt(.int(1)), PlutusData.bigInt(.int(10))),
         ]))

@@ -51,7 +51,7 @@ func voteData(_ vote: Vote) -> PlutusData {
 func governanceActionIdData(_ id: GovActionID) throws -> PlutusData {
     constr(0, [
         .bytes(try Bytes(from: id.transactionID.payload)),
-        .bigInt(.int(Int64(id.govActionIndex))),
+        integerData(id.govActionIndex),
     ])
 }
 
@@ -88,9 +88,9 @@ func votesData(_ procedures: VotingProcedures?) throws -> PlutusData {
         for vote in votes {
             inner[try governanceActionIdData(vote.id)] = voteData(vote.vote)
         }
-        map[try voterData(voter)] = inner.isEmpty ? .map([:]) : .map(inner)
+        map[try voterData(voter)] = inner.isEmpty ? .map([:]) : .map(MapPairs(inner))
     }
-    return map.isEmpty ? .map([:]) : .map(map)
+    return map.isEmpty ? .map([:]) : .map(MapPairs(map))
 }
 
 /// `ProposalProcedure { deposit, return_address, governance_action }`.
@@ -103,7 +103,7 @@ func proposalProcedureData(
     protocolMajorVersion: Int
 ) throws -> PlutusData {
     constr(0, [
-        .bigInt(.int(Int64(proposal.deposit))),
+        integerData(proposal.deposit),
         try rewardAccountCredentialData(proposal.rewardAccount),
         try governanceActionData(proposal.govAction, protocolMajorVersion: protocolMajorVersion),
     ])
@@ -128,18 +128,18 @@ func governanceActionData(
             return constr(1, [
                 maybeData(try action.id.map { try governanceActionIdData($0) }),
                 constr(0, [
-                    .bigInt(.int(Int64(action.protocolVersion.major ?? 0))),
-                    .bigInt(.int(Int64(action.protocolVersion.minor ?? 0))),
+                    integerData(action.protocolVersion.major ?? 0),
+                    integerData(action.protocolVersion.minor ?? 0),
                 ]),
             ])
 
         case .treasuryWithdrawalsAction(let action):
             var map = OrderedDictionary<PlutusData, PlutusData>()
             for (account, coin) in orderedRewardAccounts(action.withdrawals) {
-                map[try rewardAccountCredentialData(account)] = .bigInt(.int(Int64(coin)))
+                map[try rewardAccountCredentialData(account)] = integerData(coin)
             }
             return constr(2, [
-                map.isEmpty ? .map([:]) : .map(map),
+                map.isEmpty ? .map([:]) : .map(MapPairs(map)),
                 maybeData(try action.policyHash.map { .bytes(try Bytes(from: $0.payload)) }),
             ])
 
@@ -155,12 +155,12 @@ func governanceActionData(
             var added = OrderedDictionary<PlutusData, PlutusData>()
             for (credential, epoch) in action.credentialEpochs
                 .sorted(by: { CredentialType.ledgerOrder($0.key.credential, $1.key.credential) }) {
-                added[try credentialData(credential)] = .bigInt(.int(Int64(epoch)))
+                added[try credentialData(credential)] = integerData(epoch)
             }
             return constr(4, [
                 maybeData(try action.id.map { try governanceActionIdData($0) }),
                 dataList(evicted),
-                added.isEmpty ? .map([:]) : .map(added),
+                added.isEmpty ? .map([:]) : .map(MapPairs(added)),
                 rationalData(
                     numerator: action.interval.numerator,
                     denominator: action.interval.denominator
@@ -210,7 +210,7 @@ func rationalData(numerator: UInt64, denominator: UInt64) -> PlutusData {
     let (numerator, denominator) = divisor == 0
         ? (numerator, denominator)
         : (numerator / divisor, denominator / divisor)
-    return constr(0, [.bigInt(.int(Int64(numerator))), .bigInt(.int(Int64(denominator)))])
+    return constr(0, [integerData(numerator), integerData(denominator)])
 }
 
 /// The same ratio as a two-element list, which is how the ledger writes every
@@ -221,7 +221,7 @@ func rationalListData(numerator: UInt64, denominator: UInt64) -> PlutusData {
     let (numerator, denominator) = divisor == 0
         ? (numerator, denominator)
         : (numerator / divisor, denominator / divisor)
-    return dataList([.bigInt(.int(Int64(numerator))), .bigInt(.int(Int64(denominator)))])
+    return dataList([integerData(numerator), integerData(denominator)])
 }
 
 private func greatestCommonDivisor(_ lhs: UInt64, _ rhs: UInt64) -> UInt64 {
@@ -251,7 +251,7 @@ func changedParametersData(_ update: ProtocolParamUpdate) throws -> PlutusData {
         rationalListData(numerator: interval.lowerBound, denominator: interval.upperBound)
     }
     func integer<T: BinaryInteger>(_ value: T) -> PlutusData {
-        .bigInt(.int(Int64(value)))
+        integerData(value)
     }
     func exUnits(_ units: ExUnits) -> PlutusData {
         dataList([integer(units.mem), integer(units.steps)])
@@ -298,7 +298,7 @@ func changedParametersData(_ update: ProtocolParamUpdate) throws -> PlutusData {
     for parameter in parameters.sorted(by: { $0.key < $1.key }) {
         map[.bigInt(.int(parameter.key))] = parameter.value
     }
-    return map.isEmpty ? .map([:]) : .map(map)
+    return map.isEmpty ? .map([:]) : .map(MapPairs(map))
 }
 
 /// Cost models as a parameter update carries them: each language's numbers as a
@@ -313,5 +313,5 @@ private func costModelsData(_ costModels: CostModels) throws -> PlutusData {
         guard let model else { continue }
         map[.bigInt(.int(language))] = dataList(model.values.map { .bigInt(.int($0)) })
     }
-    return map.isEmpty ? .map([:]) : .map(map)
+    return map.isEmpty ? .map([:]) : .map(MapPairs(map))
 }

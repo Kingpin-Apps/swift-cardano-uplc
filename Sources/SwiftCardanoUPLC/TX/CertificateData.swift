@@ -30,7 +30,7 @@ func certificateDataV3(
 ) throws -> PlutusData {
     /// The deposit the ledger reveals for a registration or deregistration.
     func deposit(_ coin: Coin) -> PlutusData {
-        maybeData(protocolMajorVersion >= 10 ? .bigInt(.int(Int64(coin))) : nil)
+        maybeData(protocolMajorVersion >= 10 ? integerData(coin) : nil)
     }
 
     switch certificate {
@@ -69,28 +69,28 @@ func certificateDataV3(
             return constr(3, [
                 try credentialData(cert.stakeCredential),
                 try delegateToStakePool(cert.poolKeyHash),
-                .bigInt(.int(Int64(cert.coin))),
+                integerData(cert.coin),
             ])
 
         case .voteRegisterDelegate(let cert):
             return constr(3, [
                 try credentialData(cert.stakeCredential),
                 try delegateToRepresentative(cert.drep),
-                .bigInt(.int(Int64(cert.coin))),
+                integerData(cert.coin),
             ])
 
         case .stakeVoteRegisterDelegate(let cert):
             return constr(3, [
                 try credentialData(cert.stakeCredential),
                 try delegateToBoth(cert.poolKeyHash, cert.drep),
-                .bigInt(.int(Int64(cert.coin))),
+                integerData(cert.coin),
             ])
 
         case .registerDRep(let cert):
             // The anchor is not part of the script's view.
             return constr(4, [
                 try credentialData(cert.drepCredential),
-                .bigInt(.int(Int64(cert.coin))),
+                integerData(cert.coin),
             ])
 
         case .updateDRep(let cert):
@@ -99,7 +99,7 @@ func certificateDataV3(
         case .unRegisterDRep(let cert):
             return constr(6, [
                 try credentialData(cert.drepCredential),
-                .bigInt(.int(Int64(cert.coin))),
+                integerData(cert.coin),
             ])
 
         case .poolRegistration(let cert):
@@ -113,7 +113,7 @@ func certificateDataV3(
         case .poolRetirement(let cert):
             return constr(8, [
                 .bytes(try Bytes(from: cert.poolKeyHash.payload)),
-                .bigInt(.int(Int64(cert.epoch))),
+                integerData(cert.epoch),
             ])
 
         case .authCommitteeHot(let cert):
@@ -170,7 +170,7 @@ func certificateDataV1V2(_ certificate: Certificate) throws -> PlutusData {
         case .poolRetirement(let cert):
             return constr(4, [
                 .bytes(try Bytes(from: cert.poolKeyHash.payload)),
-                .bigInt(.int(Int64(cert.epoch))),
+                integerData(cert.epoch),
             ])
         default:
             throw ScriptContextError.unsupportedFeature(
