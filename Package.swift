@@ -16,9 +16,9 @@ let package = Package(
         // BigInt 6.x is source-compatible with 5.7.0; the major bump only raised the
         // manifest's tools version. Keep 5.x admissible for consumers still on it.
         .package(url: "https://github.com/attaswift/BigInt.git", "5.7.0"..<"7.0.0"),
-        .package(url: "https://github.com/Kingpin-Apps/swift-cardano-core.git", from: "0.10.0"),
-        .package(url: "https://github.com/Kingpin-Apps/swift-blst.git", from: "0.1.7"),
-        .package(url: "https://github.com/Kingpin-Apps/swift-nacl.git", from: "1.0.2"),
+        .package(url: "https://github.com/Kingpin-Apps/swift-cardano-core.git", from: "0.10.2"),
+        .package(url: "https://github.com/Kingpin-Apps/swift-blst.git", from: "0.1.9"),
+        .package(url: "https://github.com/Kingpin-Apps/swift-nacl.git", from: "1.1.0"),
         .package(url: "https://github.com/krzyzanowskim/CryptoSwift.git", from: "1.9.0"),
         .package(url: "https://github.com/21-DOT-DEV/swift-secp256k1", from: "0.22.0"),
     ],
