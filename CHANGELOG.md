@@ -1,3 +1,9 @@
+## 0.8.3 (2026-11-07)
+
+### Fix
+
+- reject validity bounds whose POSIX time does not fit
+
 ## 0.8.2 (2026-11-06)
 
 ## 0.8.1 (2026-10-30)
