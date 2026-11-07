@@ -1107,8 +1107,12 @@ private func validityRangeData(
     func bound(_ extended: PlutusData, closed: Bool) -> PlutusData {
         constr(0, [extended, closure(closed)])
     }
-    func finite(_ slot: SlotNumber, _ timeline: SlotTimeline) -> PlutusData {
-        constr(1, [.bigInt(.int(timeline.milliseconds(forSlot: slot)))])
+    func finite(_ slot: SlotNumber, _ timeline: SlotTimeline) throws -> PlutusData {
+        guard let milliseconds = timeline.milliseconds(forSlot: slot) else {
+            throw ScriptContextError.unsupportedFeature(
+                "Slot \(slot) is outside the range of POSIX times the SlotTimeline can express.")
+        }
+        return constr(1, [.bigInt(.int(milliseconds))])
     }
 
     guard validityStart != nil || ttl != nil else {
@@ -1128,9 +1132,9 @@ private func validityRangeData(
         )
     }
     return constr(0, [
-        validityStart.map { bound(finite($0, slotTimeline), closed: true) }
+        try validityStart.map { bound(try finite($0, slotTimeline), closed: true) }
             ?? bound(negativeInfinity, closed: true),
-        ttl.map { bound(finite($0, slotTimeline), closed: false) }
+        try ttl.map { bound(try finite($0, slotTimeline), closed: false) }
             ?? bound(positiveInfinity, closed: true),
     ])
 }
