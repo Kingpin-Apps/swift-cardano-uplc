@@ -20,7 +20,7 @@ let package = Package(
         .package(url: "https://github.com/Kingpin-Apps/swift-blst.git", from: "0.1.9"),
         .package(url: "https://github.com/Kingpin-Apps/swift-nacl.git", from: "2.0.0"),
         .package(url: "https://github.com/krzyzanowskim/CryptoSwift.git", from: "1.9.0"),
-        .package(url: "https://github.com/21-DOT-DEV/swift-secp256k1", from: "0.22.0"),
+        .package(url: "https://github.com/21-DOT-DEV/swift-secp256k1", from: "0.25.1"),
     ],
     targets: [
         .target(

@@ -749,10 +749,20 @@ private func verifySchnorrSecp256k1(pubKey: Data, msg: Data, sig: Data) throws -
     guard sig.count == 64 else {
         throw MachineError.typeError("verifySchnorrSecp256k1Signature: signature must be 64 bytes")
     }
-    let xonlyKey = P256K.Schnorr.XonlyKey(dataRepresentation: pubKey)
-    let signature = try P256K.Schnorr.SchnorrSignature(dataRepresentation: sig)
-    var msgBytes = Array(msg)
-    return xonlyKey.isValid(signature, for: &msgBytes)
+    // Like Plutus, a key that is not a valid x-only point is an evaluation failure.
+    let xonlyKey: P256K.Schnorr.XonlyKey
+    do {
+        xonlyKey = try P256K.Schnorr.XonlyKey(dataRepresentation: pubKey)
+    } catch {
+        throw MachineError.typeError("verifySchnorrSecp256k1Signature: invalid public key")
+    }
+    let signature: P256K.Schnorr.SchnorrSignature
+    do {
+        signature = try P256K.Schnorr.SchnorrSignature(dataRepresentation: sig)
+    } catch {
+        throw MachineError.typeError("verifySchnorrSecp256k1Signature: invalid signature")
+    }
+    return xonlyKey.isValid(signature, for: Array(msg))
 }
 
 // MARK: — IntegerToByteString
